@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -18,6 +18,7 @@ namespace TYBIM.AutoBuild
         internal class Segment
         {
             public Point A, B;
+            public int WidthMm;
             public Segment(Point a, Point b) { A = a; B = b; }
             public double Length { get { return LengthOf(B - A); } }
         }
@@ -111,7 +112,8 @@ namespace TYBIM.AutoBuild
             }
             return false;
         }
-        private static bool OpeningCoversGap(List<Segment> openings, Point start, Point direction,
+        internal class Gap { public Point Start, End; public double Width; }
+        internal static bool OpeningCoversGap(List<Segment> openings, Point start, Point direction,
             double gap, double width, double tolerance)
         {
             Point normal = Normal(direction);
@@ -190,7 +192,7 @@ namespace TYBIM.AutoBuild
         }
         internal static List<Segment> Merge(IEnumerable<Segment> source, double tolerance)
         {
-            var lines = source.Where(s => s.Length > tolerance).Select(s => new Segment(s.A, s.B)).ToList();
+            var lines = source.Where(s => s.Length > tolerance).Select(s => new Segment(s.A, s.B) { WidthMm = s.WidthMm }).ToList();
             bool changed;
             do
             {
@@ -201,6 +203,7 @@ namespace TYBIM.AutoBuild
                     for (int j = i + 1; j < lines.Count; j++)
                     {
                         var b = lines[j];
+                        if (lines[i].WidthMm != b.WidthMm) continue;
                         if (Math.Abs(Cross(d, Direction(b))) > 1e-6 ||
                             Math.Abs(Cross(b.A - lines[i].A, d)) > tolerance ||
                             Math.Abs(Cross(b.B - lines[i].A, d)) > tolerance) continue;
@@ -208,7 +211,7 @@ namespace TYBIM.AutoBuild
                         double hi = Math.Max(Dot(b.A - lines[i].A, d), Dot(b.B - lines[i].A, d));
                         if (lo > lines[i].Length + tolerance || hi < -tolerance) continue;
                         Point origin = lines[i].A;
-                        lines[i] = new Segment(origin + d * Math.Min(0, lo), origin + d * Math.Max(lines[i].Length, hi));
+                        lines[i] = new Segment(origin + d * Math.Min(0, lo), origin + d * Math.Max(lines[i].Length, hi)) { WidthMm = b.WidthMm };
                         lines.RemoveAt(j--);
                         changed = true;
                     }
@@ -360,7 +363,8 @@ namespace TYBIM.AutoBuild
                     if (material && boundaries.Any(edge => CrossesStrip(edge, a.A, d, lo, hi, width, tolerance))) material = false;
                     if (material)
                     {
-                        var axis = new Segment(a.A + d * lo + n * (width / 2), a.A + d * hi + n * (width / 2));
+                        var axis = new Segment(a.A + d * lo + n * (width / 2), a.A + d * hi + n * (width / 2))
+                            { WidthMm = (int)Math.Round(width * 304.8, MidpointRounding.AwayFromZero) };
                         if (hi - lo > width + tolerance) { centers.Add(axis); widths.Add(width); }
                         else shortCandidates.Add(Tuple.Create(axis, width));
                     }
@@ -371,7 +375,7 @@ namespace TYBIM.AutoBuild
             centers.AddRange(shortBranches);
             centers = Merge(centers, tolerance);
             // Extend only within the material region, never across an opening or another region.
-            var original = centers.Select(s => new Segment(s.A, s.B)).ToList();
+            var original = centers.Select(s => new Segment(s.A, s.B) { WidthMm = s.WidthMm }).ToList();
             for (int i = 0; i < original.Count; i++)
                 for (int j = i + 1; j < original.Count; j++)
                 {
@@ -440,3 +444,5 @@ namespace TYBIM.AutoBuild
         }
     }
 }
+
+

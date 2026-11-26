@@ -1,4 +1,4 @@
-﻿using Autodesk.Revit.DB;
+using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
 using System;
 using System.Collections.Generic;
@@ -45,7 +45,6 @@ namespace TYBIM_2025.AutoBuild
         public static List<string> layers = new List<string>(); // 儲存圖層名稱
         public static List<string> selectedLayers = new List<string>(); // 選取的圖層名稱
         public static bool byLevel = false; // 是否依樓層建立
-        public static string columnType; // 選取的類型
         public static ElementId wallTypeId;
         internal class CadWallLine
         {
@@ -60,8 +59,7 @@ namespace TYBIM_2025.AutoBuild
         private readonly Dictionary<string, ElementId> familyTypes = new Dictionary<string, ElementId>();
         private readonly string elementType;
         public static ElementId beamSymbolId;
-        public static ElementId columnSymbolId;
-        public static ElementId columnFamilyId;
+        public static ElementId columnImportId;
 
         internal bool HasPendingEvent
         {
@@ -93,6 +91,18 @@ namespace TYBIM_2025.AutoBuild
             layers = GetCADLayerLines(uidoc.Document); // 取得CAD圖層線條
             CreateLayerNames(layers); // 建立圖層名稱
 
+            if (elementType == "牆") ConfigureWallSelection();
+            if (elementType == "柱")
+            {
+                groupBox1.Visible = false;
+                int unusedWidth = groupBox3.Left - groupBox1.Left;
+                MinimumSize = new Size(MinimumSize.Width - unusedWidth, MinimumSize.Height);
+                Width -= unusedWidth;
+                groupBox3.Text = "樓層與 CAD 連結";
+                label3.Text = "CAD 連結";
+                sureBtn.Text = "預覽柱";
+            }
+
             // 基準樓層與頂部樓層
             List<Level> levels = new FilteredElementCollector(uidoc.Document).OfClass(typeof(Level)).Cast<Level>().OrderBy(x => x.Elevation).ToList();
             foreach (Level level in levels)
@@ -116,14 +126,22 @@ namespace TYBIM_2025.AutoBuild
                 foreach (WallType type in new FilteredElementCollector(uidoc.Document).OfClass(typeof(WallType)).Cast<WallType>()
                     .Where(t => t.Kind == WallKind.Basic).OrderBy(t => t.Name))
                     wallTypes[type.Name] = type.Id;
+                type_comboBox.Items.Add("自動依 CAD 牆厚選型");
                 type_comboBox.Items.AddRange(wallTypes.Keys.Cast<object>().ToArray());
+            }
+            else if (elementType == "柱")
+            {
+                foreach (var id in wallLines.Select(line => line.ImportId).Distinct())
+                {
+                    var cad = uidoc.Document.GetElement(id);
+                    string display = cad.Category.Name + " [" + id + "]";
+                    familyTypes[display] = id;
+                    type_comboBox.Items.Add(display);
+                }
             }
             else
             {
-                ElementFilter filter = elementType == "柱"
-                    ? (ElementFilter)new LogicalOrFilter(new ElementCategoryFilter(BuiltInCategory.OST_Columns),
-                        new ElementCategoryFilter(BuiltInCategory.OST_StructuralColumns))
-                    : new ElementCategoryFilter(BuiltInCategory.OST_StructuralFraming);
+                ElementFilter filter = new ElementCategoryFilter(BuiltInCategory.OST_StructuralFraming);
                 foreach (FamilySymbol symbol in new FilteredElementCollector(uidoc.Document).OfClass(typeof(FamilySymbol))
                     .WherePasses(filter).Cast<FamilySymbol>().OrderBy(s => s.FamilyName).ThenBy(s => s.Name))
                 {
@@ -151,11 +169,37 @@ namespace TYBIM_2025.AutoBuild
             if (t_level_comboBox.Items.Count > 1) t_level_comboBox.SelectedIndex = 1;
         }
 
-        private bool GetColumnFamilySymbol(FamilySymbol symbol)
+        private void ConfigureWallSelection()
         {
-            return (symbol.LookupParameter("柱寬") != null && symbol.LookupParameter("柱深") != null)
-                || (symbol.LookupParameter("b") != null && symbol.LookupParameter("h") != null);
+            var recommended = new HashSet<string>();
+            foreach (var import in wallLines.GroupBy(line => line.ImportId))
+            {
+                var lines = import.Where(line => Math.Abs(line.Start.Z - line.End.Z) <= 1 / 304.8)
+                    .Select(line => new KeyValuePair<string, WallRegionGeometry.Segment>(line.Layer,
+                        new WallRegionGeometry.Segment(new WallRegionGeometry.Point(line.Start.X, line.Start.Y),
+                            new WallRegionGeometry.Point(line.End.X, line.End.Y))));
+                var found = WallLayerDetector.AnalyzeWalls(lines, 1000 / 304.8)
+                    .Where(layer => layer.Recommended).Select(layer => layer.Layer).ToList();
+                recommended.UnionWith(found);
+                if (found.Count > 0)
+                    recommended.UnionWith(import.Select(line => line.Layer).Where(WallRegionGeometry.IsOpeningLayer));
+            }
+            allRbtn.Checked = false;
+            foreach (ListViewItem item in listView1.Items) item.Checked = recommended.Contains(item.Text);
+            var toggle = new Button { Text = "調整圖層", AutoSize = true, Location = new System.Drawing.Point(176, 22) };
+            groupBox1.Controls.Add(toggle);
+            bool expanded = recommended.Count == 0;
+            void DisplayLayers()
+            {
+                listView1.Visible = allRbtn.Visible = allCancelRbtn.Visible = expanded;
+                toggle.Text = expanded ? "收合圖層" : "調整圖層";
+            }
+            toggle.Click += (sender, args) => { expanded = !expanded; DisplayLayers(); };
+            DisplayLayers();
+            groupBox1.Text = recommended.Count == 0 ? "未辨識到牆，請手動選層" : "自動推薦圖層（可調整）";
+            sureBtn.Text = "預覽牆線";
         }
+
         private void ConfigureLayout()
         {
             Text = "自動翻" + elementType;
@@ -288,7 +332,8 @@ namespace TYBIM_2025.AutoBuild
             }
             catch(Exception ex) { MessageBox.Show("建立圖層名稱時發生錯誤: " + ex.Message); }
 
-            listView1.View = System.Windows.Forms.View.List;
+            listView1.View = System.Windows.Forms.View.Details;
+            listView1.Columns[0].Width = -2;
             //// 測試, 預設WALL的線條先打勾
             //foreach (ListViewItem item in listView1.Items)
             //{
@@ -304,17 +349,6 @@ namespace TYBIM_2025.AutoBuild
         private void allCancelRbtn_CheckedChanged(object sender, EventArgs e)
         {
             for (int i = 0; i < listView1.Items.Count; i++) { listView1.Items[i].Checked = false; }
-        }
-        // 選取文字即勾選
-        private void listView1_SelectedIndexChanged(object sender, EventArgs e)
-        {
-            ListView selectListView = sender as ListView;
-            ListViewItem focusedItem = selectListView.FocusedItem;
-            if (selectListView.SelectedItems.Count > 0)
-            {
-                if (focusedItem.Checked == true) { focusedItem.Checked = false; }
-                else { focusedItem.Checked = true; }
-            }
         }
         // 確定
         private void sureBtn_Click(object sender, System.EventArgs e)
@@ -351,14 +385,14 @@ namespace TYBIM_2025.AutoBuild
 
             if (type_comboBox.SelectedIndex < 0)
             {
-                MessageBox.Show("請選擇要建立的類型");
+                MessageBox.Show(elementType == "柱" ? "請選擇含有線段的 CAD 連結" : "請選擇要建立的類型");
                 return;
             }
 
             try
             {
                 selectedLayers = listView1.CheckedItems.Cast<ListViewItem>().Select(item => item.Text).ToList();
-                if (selectedLayers.Count == 0)
+                if (elementType != "柱" && selectedLayers.Count == 0)
                 {
                     MessageBox.Show("請至少選擇一個圖層。");
                     return;
@@ -368,16 +402,7 @@ namespace TYBIM_2025.AutoBuild
                 t_level_name = t_level_comboBox.Text;
                 if (elementType == "柱")
                 {
-                    columnSymbolId = familyTypes[type_comboBox.Text];
-                    FamilySymbol symbol = cadDocument.GetElement(columnSymbolId) as FamilySymbol;
-                    if (symbol == null) { MessageBox.Show("所選柱類型已不存在，請重新開啟視窗。"); return; }
-                    if (!GetColumnFamilySymbol(symbol))
-                    {
-                        MessageBox.Show("所選柱類型需具備「柱寬／柱深」或「b／h」參數，才能依 CAD 尺寸翻柱。");
-                        return;
-                    }
-                    columnType = symbol.FamilyName;
-                    columnFamilyId = symbol.Family.Id;
+                    columnImportId = familyTypes[type_comboBox.Text];
                     m_externalEvent_CreateColumns.Raise();
                 }
                 else if (elementType == "樑")
@@ -387,7 +412,7 @@ namespace TYBIM_2025.AutoBuild
                 }
                 else
                 {
-                    wallTypeId = wallTypes[type_comboBox.Text];
+                    wallTypeId = type_comboBox.SelectedIndex == 0 ? ElementId.InvalidElementId : wallTypes[type_comboBox.Text];
                     m_externalEvent_CreateWalls.Raise();
                 }
             }
@@ -403,3 +428,7 @@ namespace TYBIM_2025.AutoBuild
         }
     }
 }
+
+
+
+

@@ -1,4 +1,4 @@
-using Autodesk.Revit.DB;
+﻿using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
 using System;
 using System.Collections.Generic;
@@ -20,11 +20,12 @@ namespace TYBIM.AutoBuild
                 TaskDialog.Show("自動翻牆", "目前文件與讀取 DWG 的文件不同，請關閉自動翻模視窗後，在目前文件重新開啟。");
                 return;
             }
+            bool automatic = LayersForm.wallTypeId == ElementId.InvalidElementId;
             WallType type = doc.GetElement(LayersForm.wallTypeId) as WallType;
             var levels = new FilteredElementCollector(doc).OfClass(typeof(Level)).Cast<Level>().OrderBy(l => l.Elevation).ToList();
             Level bottom = levels.FirstOrDefault(l => l.Name == LayersForm.b_level_name);
             Level top = levels.FirstOrDefault(l => l.Name == LayersForm.t_level_name);
-            if (type == null || type.Kind != WallKind.Basic || bottom == null || top == null || top.Elevation <= bottom.Elevation)
+            if ((!automatic && (type == null || type.Kind != WallKind.Basic)) || bottom == null || top == null || top.Elevation <= bottom.Elevation)
             {
                 TaskDialog.Show("自動翻牆", "請選擇基本牆類型與有效的基準／頂部樓層。");
                 return;
@@ -35,6 +36,12 @@ namespace TYBIM.AutoBuild
             var selected = new HashSet<string>(LayersForm.selectedLayers);
             int unsupported = LayersForm.unsupportedWallCurves.Where(p => selected.Contains(p.Key)).Sum(p => p.Value);
             var centerLines = new List<WallRegionGeometry.Segment>();
+            var stories = LayersForm.byLevel ? levels.Where(l => l.Elevation >= bottom.Elevation && l.Elevation <= top.Elevation)
+                .GroupBy(l => l.Elevation).Select(g => g.First()).ToList() : new List<Level> { bottom, top };
+            stories[0] = bottom; stories[stories.Count - 1] = top;
+            var heights = stories.Take(stories.Count - 1).Select(level => level.ProjectElevation + 10 / 304.8).ToList();
+            var columnFaces = ColumnWallCaps.ReadFaces(doc, heights);
+            var inferred = new List<WallRegionGeometry.Segment>();
             int regions = 0, openEdges = 0, invalidLoops = 0, nonPlanar = 0, joinedOpenings = 0;
             // Keep separate DWG placements separate while reconstructing their regions.
             foreach (var import in LayersForm.wallLines.Where(l => selected.Contains(l.Layer)).GroupBy(l => l.ImportId))
@@ -69,25 +76,60 @@ namespace TYBIM.AutoBuild
                     }
                     catch (Exception) { valid = false; invalidLoops++; }
                 }
-                if (valid) centerLines.AddRange(geometry.CenterLines);
+                if (!valid) continue;
+                centerLines.AddRange(geometry.CenterLines);
+                var caps = ColumnWallCaps.Find(input, columnFaces, heights, maxThickness);
+                if (caps.Count > 0)
+                {
+                    var supplemented = WallRegionGeometry.BuildWithOpenings(input.Concat(caps), openings, tolerance, maxThickness);
+                    inferred.AddRange(supplemented.CenterLines);
+                }
             }
             centerLines = WallRegionGeometry.Merge(centerLines, tolerance).Where(s => s.Length > minimumLength).ToList();
+            var additions = new List<WallRegionGeometry.Segment>();
+            foreach (var candidate in WallRegionGeometry.Merge(inferred, tolerance).Where(s => s.Length > minimumLength))
+            {
+                var direction = (candidate.B - candidate.A) * (1 / candidate.Length);
+                bool Overlaps(WallRegionGeometry.Segment other)
+                {
+                    var a = other.A - candidate.A;
+                    var b = other.B - candidate.A;
+                    if (Math.Abs(a.X * direction.Y - a.Y * direction.X) > tolerance ||
+                        Math.Abs(b.X * direction.Y - b.Y * direction.X) > tolerance) return false;
+                    double lo = a.X * direction.X + a.Y * direction.Y, hi = b.X * direction.X + b.Y * direction.Y;
+                    return Math.Min(candidate.Length, Math.Max(lo, hi)) - Math.Max(0, Math.Min(lo, hi)) > tolerance;
+                }
+                if (!centerLines.Any(Overlaps)) { additions.Add(candidate); centerLines.Add(candidate); }
+            }
             if (centerLines.Count == 0)
             {
                 TaskDialog.Show("自動翻牆", "所選圖層未找到可建牆的封閉雙線區域。請確認邊界封閉、牆厚不超過 100 cm，且為直線輪廓。\n" +
-                    "未封閉線段：" + openEdges + "；無效邊界：" + invalidLoops + "；非水平線段：" + nonPlanar + "；不支援的曲線：" + unsupported);
+                    "未封閉線段：" + openEdges + "；無效邊界：" + invalidLoops + "；非水平線段：" + nonPlanar + "；已略過的 CAD 曲線：" + unsupported);
                 return;
             }
-            var stories = LayersForm.byLevel ? levels.Where(l => l.Elevation >= bottom.Elevation && l.Elevation <= top.Elevation)
-                .GroupBy(l => l.Elevation).Select(g => g.First()).ToList() : new List<Level> { bottom, top };
-            stories[0] = bottom; stories[stories.Count - 1] = top;
+            using (var preview = new WallPreview(LayersForm.wallLines, centerLines, stories.Count - 1, additions))
+            {
+                if (preview.ShowDialog() != System.Windows.Forms.DialogResult.OK) return;
+                centerLines.RemoveAll(preview.Excluded.Contains);
+            }
             int count = 0, failed = 0;
             var errors = new List<string>();
             try
             {
+                using var group = new TransactionGroup(doc, "自動翻牆");
+                group.Start();
+                var newWalls = new List<Wall>();
                 using (var transaction = new Transaction(doc, "自動翻牆"))
                 {
                     transaction.Start();
+                    var byWidth = new Dictionary<int, WallType>();
+                    if (automatic)
+                    {
+                        var types = new FilteredElementCollector(doc).OfClass(typeof(WallType)).Cast<WallType>()
+                            .Where(t => t.Kind == WallKind.Basic).OrderBy(t => t.Name, StringComparer.Ordinal).ToList();
+                        foreach (int mm in centerLines.Select(s => s.WidthMm).Distinct().OrderBy(w => w))
+                            byWidth[mm] = ResolveType(types, mm);
+                    }
                     for (int i = 0; i < stories.Count - 1; i++)
                         foreach (var s in centerLines)
                         {
@@ -97,11 +139,14 @@ namespace TYBIM.AutoBuild
                                 try
                                 {
                                     Line axis = Line.CreateBound(new XYZ(s.A.X, s.A.Y, stories[i].Elevation), new XYZ(s.B.X, s.B.Y, stories[i].Elevation));
-                                    Wall wall = Wall.Create(doc, axis, type.Id, stories[i].Id,
+                                    Wall wall = Wall.Create(doc, axis, (automatic ? byWidth[s.WidthMm] : type).Id, stories[i].Id,
                                         stories[i + 1].Elevation - stories[i].Elevation, 0, false, false);
+                                    WallUtils.DisallowWallJoinAtEnd(wall, 0);
+                                    WallUtils.DisallowWallJoinAtEnd(wall, 1);
                                     wall.get_Parameter(BuiltInParameter.WALL_KEY_REF_PARAM).Set(0);
                                     wall.get_Parameter(BuiltInParameter.WALL_HEIGHT_TYPE).Set(stories[i + 1].Id);
-                                    step.Commit(); count++;
+                                    if (step.Commit() == TransactionStatus.Committed) { newWalls.Add(wall); count++; }
+                                    else failed++;
                                 }
                                 catch (Exception ex)
                                 {
@@ -116,12 +161,81 @@ namespace TYBIM.AutoBuild
                         return;
                     }
                 }
+                int deferred = 0;
+                if (newWalls.Count > 0 && !RestoreEnds(doc, newWalls))
+                    foreach (var wall in newWalls)
+                        if (!RestoreEnds(doc, new[] { wall })) deferred++;
+                if (group.Assimilate() != TransactionStatus.Committed)
+                    throw new InvalidOperationException("自動翻牆交易群組未成功提交。");
                 TaskDialog.Show("自動翻牆", "已生成 " + count + " 道牆；封閉邊界 " + regions + " 個；已連接開口 " + joinedOpenings + " 處。\n" +
                     "略過未封閉線段：" + openEdges + "；無效邊界：" + invalidLoops + "；非水平線段：" + nonPlanar +
-                    "；不支援的曲線：" + unsupported + "；建牆失敗：" + failed + (errors.Count == 0 ? "" : "\n" + string.Join("\n", errors)));
+                    "；已略過的 CAD 曲線：" + unsupported + "；保留未開放接合的牆：" + deferred + "；建牆失敗：" + failed + (errors.Count == 0 ? "" : "\n" + string.Join("\n", errors)));
             }
             catch (Exception ex) { TaskDialog.Show("自動翻牆", "建牆失敗：" + ex.Message); }
         }
+        private sealed class RollBackJoinErrors : IFailuresPreprocessor
+        {
+            public FailureProcessingResult PreprocessFailures(FailuresAccessor accessor)
+            {
+                return accessor.GetFailureMessages().Any(f => f.GetSeverity() >= FailureSeverity.Error)
+                    ? FailureProcessingResult.ProceedWithRollBack : FailureProcessingResult.Continue;
+            }
+        }
+
+        private static bool RestoreEnds(Document doc, IEnumerable<Wall> walls)
+        {
+            using var tx = new Transaction(doc, "自動翻牆");
+            tx.Start();
+            var options = tx.GetFailureHandlingOptions().SetClearAfterRollback(true)
+                .SetFailuresPreprocessor(new RollBackJoinErrors());
+            tx.SetFailureHandlingOptions(options);
+            try
+            {
+                foreach (var wall in walls)
+                    for (int end = 0; end < 2; end++)
+                        WallUtils.AllowWallJoinAtEnd(wall, end);
+                return tx.Commit() == TransactionStatus.Committed;
+            }
+            catch (Autodesk.Revit.Exceptions.RegenerationFailedException) { throw; }
+            catch (Exception) when (tx.GetStatus() == TransactionStatus.Started)
+            {
+                tx.RollBack();
+                return false;
+            }
+        }
+
+        private static WallType ResolveType(List<WallType> types, int mm)
+        {
+            if (mm <= 0) throw new InvalidOperationException("無法判定 CAD 牆厚。");
+            double width = mm / 304.8;
+            var ordered = types.OrderBy(t => Math.Abs(t.Width - width)).ToList();
+            var match = ordered.FirstOrDefault(t => Math.Abs(t.Width - width) < 0.5 / 304.8);
+            if (match != null) return match;
+            var basis = ordered.FirstOrDefault(t => t.GetCompoundStructure() is CompoundStructure cs &&
+                !cs.IsVerticallyCompound && cs.LayerCount == 1 && cs.GetLayerWidth(0) > 0)
+                ?? ordered.FirstOrDefault();
+            if (basis == null) throw new InvalidOperationException("專案缺少可複製的基本牆型。");
+            string stem = $"TYBIM CAD {mm}mm", name = stem;
+            for (int i = 2; types.Any(t => string.Equals(t.Name, name, StringComparison.OrdinalIgnoreCase)); i++)
+                name = $"{stem} ({i})";
+            var copy = (WallType)basis.Duplicate(name);
+            var structure = copy.GetCompoundStructure();
+            if (structure != null && !structure.IsVerticallyCompound && structure.LayerCount == 1 && structure.GetLayerWidth(0) > 0)
+                structure.SetLayerWidth(0, width);
+            else
+                structure = CompoundStructure.CreateSingleLayerCompoundStructure(MaterialFunctionAssignment.Structure,
+                    width, ElementId.InvalidElementId);
+            copy.SetCompoundStructure(structure);
+            if (Math.Abs(copy.Width - width) > 1e-6)
+                throw new InvalidOperationException($"無法建立 {mm} mm 基本牆型。");
+            types.Add(copy);
+            return copy;
+        }
+
         public string GetName() { return "自動翻牆"; }
     }
 }
+
+
+
+

@@ -1,4 +1,4 @@
-﻿namespace TYBIM_2025.AutoBuild
+namespace TYBIM_2025.AutoBuild
 {
     partial class LayersForm
     {
@@ -16,7 +16,7 @@
             this.sureBtn = new System.Windows.Forms.Button();
             this.allCancelRbtn = new System.Windows.Forms.RadioButton();
             this.allRbtn = new System.Windows.Forms.RadioButton();
-            this.listView1 = new System.Windows.Forms.ListView();
+            this.listView1 = new LayerCheckList();
             this.groupBox1 = new System.Windows.Forms.GroupBox();
             this.groupBox3 = new System.Windows.Forms.GroupBox();
             this.byLevelCB = new System.Windows.Forms.CheckBox();
@@ -79,7 +79,6 @@
             this.listView1.UseCompatibleStateImageBehavior = false;
             this.listView1.View = System.Windows.Forms.View.Details;
             this.listView1.TabIndex = 2;
-            this.listView1.SelectedIndexChanged += new System.EventHandler(this.listView1_SelectedIndexChanged);
 
             this.groupBox1.Name = "groupBox1";
             this.groupBox1.Text = "DWG 圖層";
@@ -190,3 +189,4 @@
         private System.Windows.Forms.ComboBox type_comboBox;
     }
 }
+
