@@ -9,12 +9,20 @@ using Autodesk.Revit.UI;
 using D = System.Drawing;
 using F = System.Windows.Forms;
 
+using TYBIM.Diagnostics;
+
 namespace TYBIM.AutoBuild
 {
     [Autodesk.Revit.Attributes.Transaction(Autodesk.Revit.Attributes.TransactionMode.Manual)]
     public class CreateColumns : IExternalCommand, IExternalEventHandler
     {
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
+        {
+            return CommandErrors.Execute("自動翻柱", "請確認 DWG 連結已載入、目標圖層有封閉矩形，且專案已載入適用的矩形柱族群。",
+                commandData, ref message, elements, ExecuteCore);
+        }
+
+        private Result ExecuteCore(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
             return LayersForm.OpenForm(commandData, "柱");
         }
@@ -143,8 +151,7 @@ namespace TYBIM.AutoBuild
         {
             var doc = app.ActiveUIDocument?.Document;
             if (doc == null || !doc.Equals(LayersForm.cadDocument)) { TaskDialog.Show("自動翻柱","請在目前文件重新開啟翻柱。"); return; }
-            try { Preview(doc); }
-            catch (Exception e) { TaskDialog.Show("自動翻柱", e.Message); }
+            CommandErrors.ExecuteEvent("自動翻柱", "請檢查 DWG 圖層、矩形柱族群與基準／頂部樓層。", () => Preview(doc));
         }
 
         private static void Preview(Document doc)
@@ -323,12 +330,15 @@ namespace TYBIM.AutoBuild
                                     inst.get_Parameter(BuiltInParameter.SCHEDULE_BASE_LEVEL_OFFSET_PARAM).Set(0.0);
                                     inst.get_Parameter(BuiltInParameter.SCHEDULE_TOP_LEVEL_OFFSET_PARAM).Set(0.0);
                                     ElementTransformUtils.RotateElement(doc,inst.Id,Line.CreateBound(p,p+XYZ.BasisZ),c.Angle);
-                                    sub.Commit();
+                                    var status = sub.Commit();
+                                    if (status != TransactionStatus.Committed)
+                                        throw new InvalidOperationException($"Revit 未提交柱元件（狀態：{status}）。");
                                     if(!types.Contains(symbol)) types.Add(symbol);
                                     occupied.Add(key);
                                     placed++;
 
                                 }
+                                catch (Autodesk.Revit.Exceptions.RegenerationFailedException) { throw; }
                                 catch(Exception e)
                                 {
                                     if(sub.GetStatus()==TransactionStatus.Started) sub.RollBack();
@@ -358,7 +368,7 @@ namespace TYBIM.AutoBuild
                         saved.Set<IDictionary<string,string>>("Layers",choices);
                         cad.SetEntity(saved);
                     }
-                    if(tx.Commit()!=TransactionStatus.Committed) throw new InvalidOperationException("翻柱交易未完成。");
+                    CommandErrors.Commit(tx);
                 }
                 TaskDialog.Show("自動翻柱","建立 "+placed+" 支，略過已放置 "+skipped+" 支，失敗 "+errors.Count+" 支。"+Environment.NewLine+string.Join(Environment.NewLine,errors.Distinct().Take(6)));
             }

@@ -83,6 +83,10 @@
     <Compile Include="AutoBuild\FloorLevelMembership.cs" />
     <Compile Include="AutoBuild\CreateFloors.cs" />
     <Compile Include="AutoBuild\CreateBeams.cs" />
+    <Compile Include="AutoBuild\BeamGeometry.cs" />
+    <Compile Include="AutoBuild\BeamPreview.cs">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="AutoBuild\CreateColumns.cs" />
     <Compile Include="AutoBuild\ColumnWallCaps.cs" />
     <Compile Include="AutoBuild\LayerCheckList.cs">
@@ -95,6 +99,10 @@
     </Compile>
     <Compile Include="AutoBuild\CreateWalls.cs" />
     <Compile Include="AutoBuild\WallRegionGeometry.cs" />
+    <Compile Include="AutoBuild\AutoJoinCommand.cs" />
+    <Compile Include="AutoBuild\AutoJoinWindow.xaml.cs">
+      <DependentUpon>AutoJoinWindow.xaml</DependentUpon>
+    </Compile>
     <Compile Include="Calculate\CategorySelectionForm.cs">
       <SubType>Form</SubType>
     </Compile>
@@ -167,6 +175,10 @@
       <SubType>Designer</SubType>
       <Generator>MSBuild:Compile</Generator>
     </Page>
+    <Page Include="AutoBuild\AutoJoinWindow.xaml">
+      <SubType>Designer</SubType>
+      <Generator>MSBuild:Compile</Generator>
+    </Page>
   </ItemGroup>
   <ItemGroup>
     <Compile Include="SEM\AutoNumber.cs">
@@ -222,9 +234,11 @@
     <Compile Include="Common\ProgressForm.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="Common\CommandErrors.cs" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <ItemGroup>
     <EmbeddedResource Include="Pic\TYBIM.ico" LogicalName="TYBIM.WindowIcon" />
+    <EmbeddedResource Include="Pic\自動接合.png" LogicalName="TYBIM.AutoJoinImage" />
   </ItemGroup>
 </Project>

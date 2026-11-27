@@ -158,9 +158,7 @@ namespace TYBIM.Architecture
                 catch (Autodesk.Revit.Exceptions.OperationCanceledException) { return Result.Cancelled; }
                 catch (Exception ex)
                 {
-                    message = ex.Message;
-                    TaskDialog.Show("間距標籤", "無法完成間距尺寸。\n" + ex.Message);
-                    return Result.Failed;
+                    throw new InvalidOperationException("自動配置間距尺寸時發生錯誤。", ex);
                 }
             }
         }

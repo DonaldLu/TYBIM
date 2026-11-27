@@ -1,7 +1,9 @@
-﻿using Autodesk.Revit.DB;
+using Autodesk.Revit.DB;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+
+using TYBIM.Diagnostics;
 
 namespace TYBIM_2025.AutoBuild
 {
@@ -22,8 +24,9 @@ namespace TYBIM_2025.AutoBuild
         }
 
         public FloorCreationResult TryCreate(Document doc, CurveLoop profile,
-            ElementId floorTypeId, ElementId levelId)
+            ElementId floorTypeId, ElementId levelId, out string reason)
         {
+            reason = null;
             using (var transaction = new SubTransaction(doc))
             {
                 transaction.Start();
@@ -38,6 +41,7 @@ namespace TYBIM_2025.AutoBuild
                     FloorGeometry candidate = ReadGeometry(floor);
                     if (!candidate.IsReadable)
                     {
+                        reason = $"無法讀取新樓板的實體。{candidate.Error}";
                         transaction.RollBack();
                         return FloorCreationResult.Failed;
                     }
@@ -49,6 +53,7 @@ namespace TYBIM_2025.AutoBuild
                         // commit a new floor and risk silently duplicating quantities.
                         if (!existing.IsReadable)
                         {
+                            reason = $"無法檢查既有樓板重疊（元件 ID：{existing.Id}）。{existing.Error}";
                             transaction.RollBack();
                             return FloorCreationResult.Failed;
                         }
@@ -67,8 +72,12 @@ namespace TYBIM_2025.AutoBuild
                         }
                     }
 
-                    if (transaction.Commit() != TransactionStatus.Committed)
+                    var status = transaction.Commit();
+                    if (status != TransactionStatus.Committed)
+                    {
+                        reason = $"Revit 拒絕建立該樓板（狀態：{status}）。";
                         return FloorCreationResult.Failed;
+                    }
                     // Include this run's floors even before the outer transaction commits.
                     occupied.Add(candidate);
                     return FloorCreationResult.Created;
@@ -78,8 +87,9 @@ namespace TYBIM_2025.AutoBuild
                     // Revit requires the owning transaction to abort after regeneration fails.
                     throw;
                 }
-                catch
+                catch (Exception ex) when (!(ex is Autodesk.Revit.Exceptions.OperationCanceledException))
                 {
+                    reason = CommandErrors.Describe(ex);
                     if (transaction.GetStatus() == TransactionStatus.Started)
                         transaction.RollBack();
                     return FloorCreationResult.Failed;
@@ -89,7 +99,7 @@ namespace TYBIM_2025.AutoBuild
 
         private static FloorGeometry ReadGeometry(Floor floor)
         {
-            var result = new FloorGeometry();
+            var result = new FloorGeometry { Id = floor.Id.Value };
             try
             {
                 result.Bounds = floor.get_BoundingBox(null);
@@ -101,7 +111,7 @@ namespace TYBIM_2025.AutoBuild
                 result.IsReadable = result.Bounds != null && result.Solids.Count > 0;
             }
             catch (Autodesk.Revit.Exceptions.RegenerationFailedException) { throw; }
-            catch { result.IsReadable = false; }
+            catch (Exception ex) { result.Error = CommandErrors.Describe(ex); }
             return result;
         }
 
@@ -131,6 +141,8 @@ namespace TYBIM_2025.AutoBuild
             public BoundingBoxXYZ Bounds;
             public readonly List<Solid> Solids = new List<Solid>();
             public bool IsReadable;
+            public long Id;
+            public string Error;
         }
     }
 }

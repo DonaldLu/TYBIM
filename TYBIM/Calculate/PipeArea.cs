@@ -1,4 +1,4 @@
-﻿using Autodesk.Revit.Attributes;
+using Autodesk.Revit.Attributes;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
 using System;
@@ -8,12 +8,20 @@ using System.Linq;
 using System.Windows.Forms;
 using TaskDialog = Autodesk.Revit.UI.TaskDialog;
 
+using TYBIM.Diagnostics;
+
 namespace TYBIM.Calculate
 {
     [Transaction(TransactionMode.Manual)]
     public class PipeArea : IExternalCommand
     {
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
+        {
+            return CommandErrors.Execute("管道面積", "請確認所需的連結模型已載入，並檢查所選品類與要計算的元件。",
+                commandData, ref message, elements, ExecuteCore);
+        }
+
+        private Result ExecuteCore(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
             UIApplication uiapp = commandData.Application;
             UIDocument uidoc = uiapp.ActiveUIDocument;
@@ -86,10 +94,10 @@ namespace TYBIM.Calculate
 
                 return Result.Succeeded;
             }
+            catch (Autodesk.Revit.Exceptions.OperationCanceledException) { throw; }
             catch (Exception ex)
             {
-                message = ex.ToString();
-                return Result.Failed;
+                throw new InvalidOperationException("讀取機電元件或統計面積時發生錯誤。", ex);
             }
         }
 

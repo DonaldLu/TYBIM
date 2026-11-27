@@ -4,6 +4,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 
+using TYBIM.Diagnostics;
+
 namespace TYBIM.AutoBuild
 {
     [Autodesk.Revit.Attributes.Transaction(Autodesk.Revit.Attributes.TransactionMode.Manual)]
@@ -11,10 +13,21 @@ namespace TYBIM.AutoBuild
     {
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
+            return CommandErrors.Execute("自動翻牆", "請確認 DWG 圖層有有效的封閉雙線、牆類型為基本牆，且頂部樓層高於基準樓層。",
+                commandData, ref message, elements, ExecuteCore);
+        }
+
+        private Result ExecuteCore(ExternalCommandData commandData, ref string message, ElementSet elements)
+        {
             return LayersForm.OpenForm(commandData, "牆");
         }
 
         public void Execute(UIApplication app)
+        {
+            CommandErrors.ExecuteEvent("自動翻牆", "請檢查 DWG 封閉雙線、基本牆類型及基準／頂部樓層。", () => PreviewAndCreate(app));
+        }
+
+        private static void PreviewAndCreate(UIApplication app)
         {
             if (app.ActiveUIDocument == null) return;
             Document doc = app.ActiveUIDocument.Document;
@@ -195,21 +208,22 @@ namespace TYBIM.AutoBuild
                                     WallUtils.DisallowWallJoinAtEnd(wall, 1);
                                     wall.get_Parameter(BuiltInParameter.WALL_KEY_REF_PARAM).Set(0);
                                     wall.get_Parameter(BuiltInParameter.WALL_HEIGHT_TYPE).Set(stories[i + 1].Id);
-                                    if (step.Commit() == TransactionStatus.Committed) { newWalls.Add(wall); count++; }
-                                    else failed++;
+                                    var status = step.Commit();
+                                    if (status != TransactionStatus.Committed)
+                                        throw new InvalidOperationException($"Revit 未提交該牆（狀態：{status}）。");
+                                    newWalls.Add(wall);
+                                    count++;
                                 }
+                                catch (Autodesk.Revit.Exceptions.RegenerationFailedException) { throw; }
                                 catch (Exception ex)
                                 {
-                                    step.RollBack(); failed++;
+                                    if (step.GetStatus() == TransactionStatus.Started) step.RollBack();
+                                    failed++;
                                     if (errors.Count < 3) errors.Add(ex.Message);
                                 }
                             }
                         }
-                    if (transaction.Commit() != TransactionStatus.Committed)
-                    {
-                        TaskDialog.Show("自動翻牆", "建牆交易未成功提交，請檢查 Revit 的錯誤訊息。");
-                        return;
-                    }
+                    CommandErrors.Commit(transaction);
                 }
                 int deferred = 0;
                 if (newWalls.Count > 0 && !RestoreEnds(doc, newWalls))
@@ -221,7 +235,8 @@ namespace TYBIM.AutoBuild
                     "略過未封閉線段：" + openEdges + "；無效邊界：" + invalidLoops + "；非水平線段：" + nonPlanar +
                     "；已略過的 CAD 曲線：" + unsupported + "；保留未開放接合的牆：" + deferred + "；建牆失敗：" + failed + (errors.Count == 0 ? "" : "\n" + string.Join("\n", errors)));
             }
-            catch (Exception ex) { TaskDialog.Show("自動翻牆", "建牆失敗：" + ex.Message); }
+            catch (Autodesk.Revit.Exceptions.OperationCanceledException) { throw; }
+            catch (Exception ex) { throw new InvalidOperationException("建立牆或還原牆端接合時發生錯誤。", ex); }
         }
         private sealed class RollBackJoinErrors : IFailuresPreprocessor
         {

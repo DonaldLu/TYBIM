@@ -64,6 +64,12 @@ namespace TYBIM
             createRoomWallBtn.ToolTip = "【功能介紹】\n沿房間完成面邊界向內建立裝修牆，牆底位於房間所屬樓層，高度固定為 3 公尺。";
             createRoomWallBtn.LongDescription = "【使用步驟】\n1. 先放置房間並確認房間已封閉且面積大於零。\n2. 展開樓層勾選房間，或勾選樓層以全選該樓層房間，再選擇裝修牆類型。\n3. 按「確定」建立，完成後查看處理房間數與建立牆數。";
             createRoomWallBtn.ToolTipImage = convertFromBitmap(Properties.Resources.自動裝修牆_原圖, 250);
+            PushButton autoJoinBtn = ribbonPanel.AddItem(new PushButtonData("AutoJoin", "自動接合", addinAssmeblyPath, typeof(AutoBuild.AutoJoinCommand).FullName)) as PushButton;
+            autoJoinBtn.Image = AutoBuild.AutoJoinWindow.LoadArtwork(16, whiteBackground: true);
+            autoJoinBtn.LargeImage = AutoBuild.AutoJoinWindow.LoadArtwork(32, whiteBackground: true);
+            autoJoinBtn.ToolTip = "【功能介紹】\n在目前視圖的專案模型中，依所選品類批次接合柱、樑、牆與樓板，也可解除既有接合。";
+            autoJoinBtn.LongDescription = "【使用步驟】\n1. 開啟要處理的模型視圖，點選「自動接合」。\n2. 選擇建立或取消接合、指定主體品類，再勾選接合品類。\n3. 按「開始接合」或「解除接合」，查看處理組數並檢查元件交界。";
+            autoJoinBtn.ToolTipImage = AutoBuild.AutoJoinWindow.LoadArtwork(250, whiteBackground: true);
 
             // 添加「SEM」面板
             try { ribbonPanel = application.CreateRibbonPanel(ribbonName, "SEM"); }

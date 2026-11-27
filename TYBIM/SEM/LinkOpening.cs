@@ -1,4 +1,4 @@
-﻿using Autodesk.Revit.Attributes;
+using Autodesk.Revit.Attributes;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.DB.Electrical;
 using Autodesk.Revit.DB.Mechanical;
@@ -11,6 +11,8 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using static TYBIM.SEM.MegedOpening;
 using static TYBIM.SEM.ProfessionalCodeForm;
+
+using TYBIM.Diagnostics;
 
 namespace TYBIM.SEM
 {
@@ -108,6 +110,12 @@ namespace TYBIM.SEM
         public static double meter_conversion = 0.3048;
 
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
+        {
+            return CommandErrors.Execute("自動開口", "請確認機電連結已載入、設定的專業代碼正確，並檢查開口或套管族群。",
+                commandData, ref message, elements, ExecuteCore);
+        }
+
+        private Result ExecuteCore(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
             UIApplication uiapp = commandData.Application;
             UIDocument uidoc = uiapp.ActiveUIDocument;
@@ -411,6 +419,7 @@ namespace TYBIM.SEM
                         TransactionGroup tranGrp1 = new TransactionGroup(doc, "自動開口");
                         tranGrp1.Start();
                         int amount = 0;
+                        var operationIssues = new List<string>();
                         using (Transaction trans = new Transaction(doc, "放置開口"))
                         {
                             FailureHandlingOptions options = trans.GetFailureHandlingOptions();
@@ -422,18 +431,12 @@ namespace TYBIM.SEM
                             List<FamilySymbol> openFSList = FindFS(doc);
                             foreach (OpeningInfo openingInfo in openingInfoList)
                             {
-                                try
-                                {
-                                    foreach (CrushElemInfo crushElemInfo in openingInfo.crushElemInfos)
-                                    {
-                                        amount = PlaceOpening(doc, crushElemInfo, openFSList, amount);
-                                    }
-                                }
-                                catch (Exception) { }
+                                foreach (CrushElemInfo crushElemInfo in openingInfo.crushElemInfos)
+                                    amount = PlaceOpening(doc, crushElemInfo, openFSList, amount, operationIssues);
                             }
                             doc.Regenerate();
                             uidoc.RefreshActiveView();
-                            trans.Commit();
+                            CommandErrors.Commit(trans);
                         }
 
                         using (Transaction trans = new Transaction(doc, "旋轉修改開口參數"))
@@ -444,10 +447,10 @@ namespace TYBIM.SEM
                             options.SetFailuresPreprocessor(preproccessor);
                             trans.SetFailureHandlingOptions(options);
                             trans.Start();
-                            RotateEditOpening(doc, openingInfoList);
+                            RotateEditOpening(doc, openingInfoList, operationIssues);
                             doc.Regenerate();
                             uidoc.RefreshActiveView();
-                            trans.Commit();
+                            CommandErrors.Commit(trans);
                         }
 
                         using (Transaction trans = new Transaction(doc, "計算底部高程"))
@@ -456,7 +459,7 @@ namespace TYBIM.SEM
                             EditBottomElevation(doc, combinePCodes);
                             doc.Regenerate();
                             uidoc.RefreshActiveView();
-                            trans.Commit();
+                            CommandErrors.Commit(trans);
                         }
 
                         List<int> deleteIds = new List<int>();
@@ -489,9 +492,11 @@ namespace TYBIM.SEM
                             }
                             doc.Regenerate();
                             uidoc.RefreshActiveView();
-                            trans.Commit();
+                            CommandErrors.Commit(trans);
                         }
-                        tranGrp1.Assimilate();
+                        var groupStatus = tranGrp1.Assimilate();
+                        if (groupStatus != TransactionStatus.Committed)
+                            throw new InvalidOperationException($"Revit 未提交自動開口交易群組（狀態：{groupStatus}）。");
 
                         DateTime timeEnd = DateTime.Now;
                         TimeSpan totalTime = timeEnd - timeStart;
@@ -499,10 +504,23 @@ namespace TYBIM.SEM
                         {
                             newOpeningIds.Remove(id);
                         }
-                        TaskDialog.Show("Revit", "耗時：" + totalTime.Minutes + " 分 " + totalTime.Seconds + " 秒 " + "\n\n共放置 " + amount + " 個開口。\n");
+                        var summary = new TaskDialog("自動開口")
+                        {
+                            MainInstruction = $"共放置 {amount} 個開口",
+                            MainContent = $"耗時：{totalTime.Minutes} 分 {totalTime.Seconds} 秒。"
+                        };
+                        if (operationIssues.Count > 0)
+                        {
+                            summary.MainContent += $"\n有 {operationIssues.Count} 筆需檢查。\n{operationIssues[0]}\n請檢查對應元件、開口族群及其參數。";
+                            if (operationIssues.Count > 1)
+                                summary.ExpandedContent = string.Join("\n", operationIssues.Take(20)) +
+                                    (operationIssues.Count > 20 ? $"\n另有 {operationIssues.Count - 20} 筆明細。" : "");
+                        }
+                        summary.Show();
                     }
                 }
-                catch (Exception ex) { TaskDialog.Show("Revit", ex.Message + "\n" + ex.ToString()); }
+                catch (Autodesk.Revit.Exceptions.OperationCanceledException) { throw; }
+                catch (Exception ex) { throw new InvalidOperationException("分析管線或建立開口時發生錯誤。", ex); }
             }
 
             return Result.Succeeded;
@@ -1366,7 +1384,7 @@ namespace TYBIM.SEM
             return radius;
         }
 
-        private int PlaceOpening(Document doc, CrushElemInfo crushElemInfo, List<FamilySymbol> openFSList, int amount)
+        private int PlaceOpening(Document doc, CrushElemInfo crushElemInfo, List<FamilySymbol> openFSList, int amount, List<string> issues)
         {
             string useFS = string.Empty;
             if (crushElemInfo.hostType.Equals("Wall") || crushElemInfo.hostType.Equals("Beam"))
@@ -1392,6 +1410,10 @@ namespace TYBIM.SEM
 
                     if (!isDuplicate)
                     {
+                        if (openFS == null)
+                            throw new InvalidOperationException(string.IsNullOrEmpty(useFS)
+                                ? $"主體 {crushElemInfo.hostType} 與管線 {crushElemInfo.type} 沒有對應的開口族群。"
+                                : $"找不到開口族群「{useFS}」，請先載入該族群。");
                         crushElemInfo.level = ResolvePlacementLevel(crushElemInfo.level, xyz.Z);
                         crushElemInfo.deviation = xyz.Z - crushElemInfo.level.ProjectElevation;
                         FamilyInstance pipeOpen = doc.Create.NewFamilyInstance(xyz, openFS, crushElemInfo.level, Autodesk.Revit.DB.Structure.StructuralType.NonStructural);
@@ -1401,7 +1423,12 @@ namespace TYBIM.SEM
                         amount++;
                     }
                 }
-                catch (Exception ex) { string str = ex.Message; }
+                catch (Autodesk.Revit.Exceptions.RegenerationFailedException) { throw; }
+                catch (Autodesk.Revit.Exceptions.OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    issues.Add($"放置開口（交界：{crushElemInfo.comment}）：{CommandErrors.Describe(ex)}");
+                }
             }
             return amount;
         }
@@ -1423,7 +1450,7 @@ namespace TYBIM.SEM
             }
         }
 
-        private void RotateEditOpening(Document doc, List<OpeningInfo> openingInfoList)
+        private void RotateEditOpening(Document doc, List<OpeningInfo> openingInfoList, List<string> issues)
         {
             foreach (OpeningInfo openingInfo in openingInfoList)
             {
@@ -1524,7 +1551,9 @@ namespace TYBIM.SEM
                                 }
                             }
                         }
-                        catch (Exception ex) { string str = ex.Message; }
+                        catch (Autodesk.Revit.Exceptions.RegenerationFailedException) { throw; }
+                        catch (Autodesk.Revit.Exceptions.OperationCanceledException) { throw; }
+                        catch (Exception ex) { issues.Add($"調整開口（元件 ID：{pipeOpen.Id.Value}）：{CommandErrors.Describe(ex)}"); }
                     }
                 }
             }

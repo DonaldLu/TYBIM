@@ -1,4 +1,4 @@
-﻿using Autodesk.Revit.Attributes;
+using Autodesk.Revit.Attributes;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.DB.Mechanical;
 using Autodesk.Revit.DB.Plumbing;
@@ -7,6 +7,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+
+using TYBIM.Diagnostics;
 
 namespace TYBIM.SEM
 {
@@ -53,6 +55,12 @@ namespace TYBIM.SEM
         private List<ErrorId> errorIds = new List<ErrorId>();
 
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
+        {
+            return CommandErrors.Execute("自動編號", "請確認開口或套管已建立，並檢查檔名簡碼設定與所需的編號參數。",
+                commandData, ref message, elements, ExecuteCore);
+        }
+
+        private Result ExecuteCore(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
             UIApplication uiapp = commandData.Application;
             UIDocument uidoc = uiapp.ActiveUIDocument;
@@ -219,7 +227,7 @@ namespace TYBIM.SEM
                     }
                 }
 
-                trans.Commit();
+                CommandErrors.Commit(trans);
             }
 
             if (errorIds.Count > 0) { CreateErrorMessage(); }

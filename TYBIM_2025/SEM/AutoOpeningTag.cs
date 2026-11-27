@@ -1,4 +1,4 @@
-﻿using Autodesk.Revit.Attributes;
+using Autodesk.Revit.Attributes;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
 using System;
@@ -9,6 +9,8 @@ using System.Text;
 using System.Windows.Forms;
 using TaskDialog = Autodesk.Revit.UI.TaskDialog;
 using TYBIM_2025.Common;
+
+using TYBIM.Diagnostics;
 
 namespace TYBIM_2025.SEM
 {
@@ -23,6 +25,12 @@ namespace TYBIM_2025.SEM
         #region IExternalCommand Entry Point
 
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
+        {
+            return CommandErrors.Execute("開口標籤", "請確認目標平面視圖的出圖設定，並檢查所需的標籤族群。",
+                commandData, ref message, elements, ExecuteCore);
+        }
+
+        private Result ExecuteCore(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
             UIApplication uiapp = commandData?.Application;
             if (uiapp == null)
@@ -51,7 +59,7 @@ namespace TYBIM_2025.SEM
                     List<ViewPlan> availableViewPlans = GetAutoNumberViewPlans(doc, autoNumberForm.viewFamilyTypeName);
                     if (availableViewPlans == null || availableViewPlans.Count == 0)
                     {
-                        TaskDialog.Show("警告", "找不到符合出圖條件的平面視圖，請確認視圖設定或「圖面分類」參數！");
+                        message = "找不到符合出圖條件的平面視圖，請確認視圖設定及「圖面分類」參數。";
                         return Result.Failed;
                     }
 
@@ -82,10 +90,10 @@ namespace TYBIM_2025.SEM
 
                 return Result.Succeeded;
             }
+            catch (Autodesk.Revit.Exceptions.OperationCanceledException) { throw; }
             catch (Exception ex)
             {
-                message = $"執行過程發生未預期錯誤：\n{ex.Message}\n{ex.StackTrace}";
-                return Result.Failed;
+                throw new InvalidOperationException("讀取出圖視圖或建立開口標籤時發生錯誤。", ex);
             }
         }
 
@@ -247,7 +255,7 @@ namespace TYBIM_2025.SEM
                     }
                 }
 
-                trans.Commit();
+                CommandErrors.Commit(trans);
             }
 
             return createdInCurrentView;
@@ -339,7 +347,7 @@ namespace TYBIM_2025.SEM
                     }
                 }
                 if (needRegen) doc.Regenerate();
-                t.Commit();
+                CommandErrors.Commit(t);
             }
 
             if (pipeAccTag != null) map[BuiltInCategory.OST_PipeAccessory] = pipeAccTag;

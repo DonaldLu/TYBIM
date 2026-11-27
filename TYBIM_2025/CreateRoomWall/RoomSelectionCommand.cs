@@ -1,173 +1,180 @@
-﻿using Autodesk.Revit.Attributes;
+using Autodesk.Revit.Attributes;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.DB.Architecture;
 using Autodesk.Revit.UI;
+using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Windows;
+using System.Windows.Interop;
+using TYBIM.Diagnostics;
 
 namespace TYBIM_2025.CreateRoomWall
 {
     [Transaction(TransactionMode.Manual)]
     public class RoomSelectionCommand : IExternalCommand
     {
+        private const string Feature = "自動裝修牆";
+        private const string Guidance = "請依錯誤訊息檢查該房間的完成面邊界、樓層與所選基本牆類型。";
+
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
-            UIApplication uiapp = commandData.Application;
-            UIDocument uidoc = uiapp.ActiveUIDocument;
-            Autodesk.Revit.ApplicationServices.Application app = uiapp.Application;
-            Document doc = uiapp.ActiveUIDocument.Document;
+            return CommandErrors.Execute(Feature, Guidance, commandData, ref message, elements, ExecuteCore);
+        }
 
-            // 1. 取得所有已放置的房間 (Area > 0)
-            var rooms = new FilteredElementCollector(doc)
-                .OfCategory(BuiltInCategory.OST_Rooms)
-                .WhereElementIsNotElementType()
-                .Cast<Room>()
-                .Where(r => r.Area > 0)
-                .ToList();
-
-            // 2. 取得所有牆類型
-            var wallTypes = new FilteredElementCollector(doc)
-                .OfClass(typeof(WallType))
-                .Cast<WallType>()
-                .OrderBy(w => w.Name)
-                .ToList();
-
-            // 3. 建立 ViewModel 並以樓層分組
-            MainViewModel viewModel = new MainViewModel();
-            foreach (var wt in wallTypes)
+        private Result ExecuteCore(ExternalCommandData commandData, ref string message, ElementSet elements)
+        {
+            var uiapp = commandData.Application;
+            var doc = uiapp.ActiveUIDocument.Document;
+            if (doc.IsFamilyDocument || doc.IsReadOnly)
             {
-                viewModel.WallTypes.Add(wt);
+                CommandErrors.Show(Feature, doc.IsFamilyDocument ? "目前開啟的是族群文件。" : "目前專案為唯讀。",
+                    "請開啟可編輯的 Revit 專案，再建立裝修牆。");
+                return Result.Cancelled;
             }
 
-            var roomsByLevel = rooms.GroupBy(r => r.Level.Name).OrderBy(g => g.Key);
-            foreach (var group in roomsByLevel)
+            var rooms = new FilteredElementCollector(doc)
+                .OfCategory(BuiltInCategory.OST_Rooms).WhereElementIsNotElementType()
+                .Cast<Room>().Where(room => room.Area > 0).ToList();
+            if (rooms.Count == 0)
             {
-                LevelNode levelNode = new LevelNode { Name = group.Key };
-                foreach (var room in group.OrderBy(r => r.Number))
+                CommandErrors.Show(Feature, "專案中沒有面積大於零的已放置房間。",
+                    "請先在目標樓層放置房間，並確認房間邊界已封閉及房間面積大於零。");
+                return Result.Cancelled;
+            }
+
+            var wallTypes = new FilteredElementCollector(doc).OfClass(typeof(WallType))
+                .Cast<WallType>().Where(type => type.Kind == WallKind.Basic).OrderBy(type => type.Name).ToList();
+            if (wallTypes.Count == 0)
+            {
+                CommandErrors.Show(Feature, "專案中找不到基本牆類型。", "請先建立或移轉所需的基本牆類型。");
+                return Result.Cancelled;
+            }
+
+            var viewModel = new MainViewModel();
+            foreach (var wallType in wallTypes)
+                viewModel.WallTypes.Add(wallType);
+            foreach (var group in rooms.GroupBy(room => room.Level?.Name ?? "未指定樓層").OrderBy(group => group.Key))
+            {
+                var level = new LevelNode { Name = group.Key };
+                foreach (var room in group.OrderBy(room => room.Number))
                 {
-                    RoomNode roomNode = new RoomNode
+                    level.Rooms.Add(new RoomNode
                     {
                         Name = $"{room.Number} - {room.Name}",
                         RoomElement = room,
-                        ParentLevel = levelNode
-                    };
-                    levelNode.Rooms.Add(roomNode);
+                        ParentLevel = level
+                    });
                 }
-                viewModel.Levels.Add(levelNode);
+                viewModel.Levels.Add(level);
             }
 
-            // 4. 開啟 WPF 視窗
-            RoomSelectionWindow window = new RoomSelectionWindow();
-            window.DataContext = viewModel;
-
-            // 必須設定 owner 為 Revit 視窗 (推薦使用 WindowInteropHelper)
-            System.Windows.Interop.WindowInteropHelper helper = new System.Windows.Interop.WindowInteropHelper(window);
-            helper.Owner = uiapp.MainWindowHandle;
-
-            if (window.ShowDialog() == true)
+            try
             {
-                // 使用者按下了確定
-                WallType selectedWall = viewModel.SelectedWallType;
-
-                // 篩選出所有被勾選的房間
-                List<Room> selectedRooms = viewModel.Levels
-                    .SelectMany(l => l.Rooms)
-                    .Where(r => r.IsSelected)
-                    .Select(r => r.RoomElement)
-                    .ToList();
-
-                // 在進入 Transaction 與迴圈之前，先取得並排序所有樓層
-                List<Level> allLevels = new FilteredElementCollector(doc)
-                    .OfClass(typeof(Level))
-                    .Cast<Level>()
-                    .OrderBy(l => l.Elevation) // 依照高程由低到高排序
-                    .ToList();
-
-                if (selectedWall == null || selectedRooms.Count == 0)
-                {
-                    TaskDialog.Show("提示", "未選擇牆類型或未勾選任何房間。");
+                var window = new RoomSelectionWindow { DataContext = viewModel };
+                new WindowInteropHelper(window).Owner = uiapp.MainWindowHandle;
+                if (window.ShowDialog() != true)
                     return Result.Cancelled;
-                }
+            }
+            catch (Autodesk.Revit.Exceptions.OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException("開啟房間及牆類型選擇視窗時發生錯誤。", ex);
+            }
 
-                // 在這裡撰寫你後續要生成的牆邏輯
-                using (Transaction t = new Transaction(doc, "依房間邊界建立牆壁"))
+            var selectedWall = viewModel.SelectedWallType;
+            var selectedRooms = viewModel.Levels.SelectMany(level => level.Rooms)
+                .Where(room => room.IsSelected).Select(room => room.RoomElement).ToList();
+            if (selectedWall == null || selectedRooms.Count == 0)
+            {
+                CommandErrors.Show(Feature, "牆類型或房間選擇不完整。", "請選擇基本牆類型並至少勾選一個房間。");
+                return Result.Cancelled;
+            }
+
+            using var transaction = new Transaction(doc, "依房間邊界建立牆壁");
+            if (transaction.Start() != TransactionStatus.Started)
+                throw new InvalidOperationException("Revit 無法開始建立裝修牆的交易。");
+
+            using var options = new SpatialElementBoundaryOptions
+            {
+                SpatialElementBoundaryLocation = SpatialElementBoundaryLocation.Finish
+            };
+            double height = UnitUtils.ConvertToInternalUnits(3000, UnitTypeId.Millimeters);
+            double offset = -selectedWall.Width / 2;
+            int created = 0;
+            int skipped = 0;
+            int fallback = 0;
+            var issues = new List<string>();
+            foreach (var room in selectedRooms)
+            {
+                var roomContext = $"房間 {room.Number} - {room.Name}（ID：{room.Id.Value}，樓層：{room.Level?.Name ?? "未指定"}）";
+                string stage = "讀取完成面邊界";
+                try
                 {
-                    t.Start();
-
-                    SpatialElementBoundaryOptions options = new SpatialElementBoundaryOptions
+                    var boundaries = room.GetBoundarySegments(options);
+                    if (boundaries == null || boundaries.Count == 0)
                     {
-                        SpatialElementBoundaryLocation = SpatialElementBoundaryLocation.Finish
-                    };
+                        skipped++;
+                        issues.Add($"{roomContext}：找不到完成面邊界。請檢查房間封閉範圍及元件的房間邊界設定。");
+                        continue;
+                    }
 
-                    int createdWallCount = 0;
-
-                    foreach (Room room in selectedRooms)
+                    for (int index = 0; index < boundaries.Count; index++)
                     {
-                        IList<IList<BoundarySegment>> boundaries = room.GetBoundarySegments(options);
-                        if (boundaries == null || boundaries.Count == 0) continue;
+                        stage = $"組合第 {index + 1} 圈完成面邊界";
+                        using var original = new CurveLoop();
+                        foreach (var segment in boundaries[index])
+                            original.Append(segment.GetCurve());
 
-                        // 保留你計算高度的邏輯
-                        double roomHeight = 3000.0 / 304.8;
-
-                        // 【關鍵 1】取得使用者選擇的牆壁厚度
-                        double wallWidth = selectedWall.Width;
-
-                        foreach (IList<BoundarySegment> boundaryLoop in boundaries)
+                        stage = $"偏移第 {index + 1} 圈完成面邊界";
+                        CurveLoop geometry = null;
+                        try
                         {
-                            // 組合原本的邊界線
-                            CurveLoop originalLoop = new CurveLoop();
-                            foreach (BoundarySegment seg in boundaryLoop)
+                            geometry = CurveLoop.CreateViaOffset(original, offset, XYZ.BasisZ);
+                        }
+                        catch (Exception ex) when (ex is Autodesk.Revit.Exceptions.InvalidOperationException
+                            or Autodesk.Revit.Exceptions.ArgumentException)
+                        {
+                            fallback++;
+                            issues.Add($"{roomContext}，{stage}失敗：{CommandErrors.Describe(ex)}。已沿原邊界建牆，請檢查牆面位置。");
+                        }
+
+                        using (geometry)
+                        {
+                            int segmentIndex = 0;
+                            foreach (var curve in geometry ?? original)
                             {
-                                originalLoop.Append(seg.GetCurve());
-                            }
-
-                            // 【關鍵 2】利用 API 直接將整圈邊界線「往房間內部」縮小！
-                            // 說明：Revit 房間邊界的左側永遠是房間內部。
-                            // 在 CreateViaOffset 中，正值代表向右偏，負值代表向左偏。
-                            // 所以我們給「負的半個牆厚 (-wallWidth / 2.0)」，整圈線就會乖乖往房間內縮。
-                            double offsetDist = -(wallWidth / 2.0);
-
-                            CurveLoop offsetLoop;
-                            try
-                            {
-                                // 執行幾何偏移
-                                offsetLoop = CurveLoop.CreateViaOffset(originalLoop, offsetDist, XYZ.BasisZ);
-                            }
-                            catch
-                            {
-                                // 防呆機制：萬一房間角落太過畸形導致偏移運算失敗，就退回原邊界
-                                offsetLoop = originalLoop;
-                            }
-
-                            // 沿著「已經往內縮」的線畫牆
-                            foreach (Curve curve in offsetLoop)
-                            {
-                                // 1. 建立牆壁 (預設用中心線畫，此時實體牆的外側已經完美貼齊原本的房間邊界了)
-                                Wall newWall = Wall.Create(doc, curve, selectedWall.Id, room.LevelId, roomHeight, 0.0, false, false);
-
-                                // 2. 建立完成後，將定位線參數改為【塗層面：外部】
-                                // 因為牆壁已經精準到位，改這個參數只會讓基準線(藍色控制點)貼齊房間邊界，不會觸發亂跑的接合 Bug！
-                                Parameter locLineParam = newWall.get_Parameter(BuiltInParameter.WALL_KEY_REF_PARAM);
-                                if (locLineParam != null && !locLineParam.IsReadOnly)
-                                {
-                                    locLineParam.Set((int)WallLocationLine.FinishFaceExterior);
-                                }
-
-                                createdWallCount++;
+                                stage = $"沿第 {index + 1} 圈第 {++segmentIndex} 段邊界建立「{selectedWall.Name}」";
+                                var wall = Wall.Create(doc, curve, selectedWall.Id, room.LevelId, height, 0, false, false);
+                                var parameter = wall.get_Parameter(BuiltInParameter.WALL_KEY_REF_PARAM);
+                                if (parameter != null && !parameter.IsReadOnly)
+                                    parameter.Set((int)WallLocationLine.FinishFaceExterior);
+                                created++;
                             }
                         }
                     }
-
-                    t.Commit();
-
-                    TaskDialog.Show("成功", $"作業完成！\n共處理了 {selectedRooms.Count} 個房間，\n總計建立了 {createdWallCount} 道牆。");
                 }
-
-                return Result.Succeeded;
+                catch (Autodesk.Revit.Exceptions.OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    throw new InvalidOperationException($"{roomContext}：{stage}時發生錯誤。", ex);
+                }
             }
 
-            return Result.Cancelled;
+            CommandErrors.Commit(transaction);
+            var dialog = new TaskDialog(Feature)
+            {
+                MainInstruction = created > 0 ? $"已建立 {created} 道裝修牆" : "沒有建立裝修牆",
+                MainContent = $"已檢查 {selectedRooms.Count} 個房間。略過 {skipped} 個房間，{fallback} 圈改沿原邊界建牆。"
+            };
+            if (issues.Count > 0)
+            {
+                dialog.MainContent += "\n\n" + issues[0];
+                if (issues.Count > 1)
+                    dialog.ExpandedContent = string.Join("\n", issues.Take(20))
+                        + (issues.Count > 20 ? $"\n另有 {issues.Count - 20} 則明細。" : "");
+            }
+            dialog.Show();
+            return Result.Succeeded;
         }
     }
 }

@@ -137,7 +137,28 @@ namespace TYBIM_2025.AutoBuild
             }
 
             const double maximumGapMm = 5;
+            footprints.StabilizeContacts();
             int gapBridges = footprints.CloseSmallGaps(UnitUtils.ConvertToInternalUnits(maximumGapMm, UnitTypeId.Millimeters));
+            // FL1 contains straight wall ends stopping 40–50 mm short of their support.
+            // Only bridge in the wall's longitudinal direction, at an actual endpoint.
+            double jointLimit = UnitUtils.ConvertToInternalUnits(50, UnitTypeId.Millimeters);
+            var ends = new List<(System.Windows.Point Point, System.Windows.Vector Axis, double HalfWidth)>();
+            foreach (Wall wall in members.OfType<Wall>())
+            {
+                if (!((wall.Location as LocationCurve)?.Curve is Line line)) continue;
+                var axis = new System.Windows.Vector(line.Direction.X, line.Direction.Y);
+                if (axis.Length < 0.99) continue;
+                axis.Normalize();
+                for (int i = 0; i < 2; i++)
+                {
+                    XYZ end = line.GetEndPoint(i);
+                    ends.Add((new System.Windows.Point(end.X - originX, end.Y - originY), axis, wall.Width / 2));
+                }
+            }
+            int wallJoints = footprints.CloseSmallGaps(jointLimit + GeometryTolerance * 32, (point, normal) => ends.Any(end =>
+                Math.Abs(end.Axis * normal) > 0.999 &&
+                Math.Abs((point - end.Point) * end.Axis) <= jointLimit &&
+                Math.Abs(System.Windows.Vector.CrossProduct(point - end.Point, end.Axis)) <= end.HalfWidth + GeometryTolerance));
             var profiles = new List<CurveLoop>();
             int uncertainRegions = 0;
             foreach (IList<System.Windows.Point> boundary in footprints.GetInnerRegions())
@@ -149,6 +170,8 @@ namespace TYBIM_2025.AutoBuild
                 }
                 var points = boundary.Select(p => new XYZ(p.X + originX, p.Y + originY, levelZ)).ToList();
                 RemoveShortEdges(points, level.Document.Application.ShortCurveTolerance);
+                AlignRuns(points, true);
+                AlignRuns(points, false);
                 if (points.Count < 3) continue;
                 var loop = new CurveLoop();
                 for (int i = 0; i < points.Count; i++)
@@ -161,6 +184,7 @@ namespace TYBIM_2025.AutoBuild
                 + " 個；幾何失敗 " + geometryFailures + " 次；聯集失敗 " + unionFailures
                 + " 次；可建板封閉區域 " + profiles.Count + " 個。"
                 + " 已處理 " + gapBridges + " 處不超過 " + maximumGapMm + " mm 的截面間隙。"
+                + " 牆端 50 mm 內補合 " + wallJoints + " 處。"
                 + (uncertainRegions > 0 ? " 因邊界無法確認，略過 " + uncertainRegions + " 個區域。" : "")
                 + (errors.Count > 0 ? "\n" + string.Join("\n", errors) : ""));
             return profiles;
@@ -225,6 +249,23 @@ namespace TYBIM_2025.AutoBuild
                 for (int i = 0; i < points.Count; i++)
                     if (points[i].DistanceTo(points[(i + 1) % points.Count]) <= minimumLength)
                     { points.RemoveAt((i + 1) % points.Count); changed = true; break; }
+            }
+        }
+
+        private static void AlignRuns(List<XYZ> points, bool horizontal)
+        {
+            // Remove sub-0.1-mm coordinate drift across an entire axis-aligned run.
+            const double tolerance = 0.00033;
+            double Coordinate(XYZ p) => horizontal ? p.Y : p.X;
+            int start = points.FindIndex(p => Math.Abs(Coordinate(p) - Coordinate(points[0])) > tolerance);
+            if (start < 0) return;
+            double anchor = Coordinate(points[start]);
+            for (int step = 1; step <= points.Count; step++)
+            {
+                int i = (start + step) % points.Count;
+                XYZ p = points[i];
+                if (Math.Abs(Coordinate(p) - anchor) > tolerance) anchor = Coordinate(p);
+                else points[i] = horizontal ? new XYZ(p.X, anchor, p.Z) : new XYZ(anchor, p.Y, p.Z);
             }
         }
     }

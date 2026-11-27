@@ -6,6 +6,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 
+using TYBIM.Diagnostics;
+
 namespace TYBIM_2025.AutoBuild
 {
     [Transaction(TransactionMode.Manual)]
@@ -15,6 +17,12 @@ namespace TYBIM_2025.AutoBuild
     {
 
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
+        {
+            return CommandErrors.Execute("自動翻板", "請確認專案有樓板類型，並檢查相關樓層的樑、牆與柱是否形成封閉區域。",
+                commandData, ref message, elements, ExecuteCore);
+        }
+
+        private Result ExecuteCore(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
             UIApplication uiapp = commandData.Application;
             UIDocument uidoc = uiapp.ActiveUIDocument;
@@ -29,7 +37,7 @@ namespace TYBIM_2025.AutoBuild
 
             if (!(view is View3D) && !isFloorPlan)
             {
-                TaskDialog.Show("提示", "請在樓層平面、結構平面或 3D 視圖中執行此功能。");
+                message = "目前視圖無法取得建板樓層。請開啟樓層平面、結構平面或 3D 視圖。";
                 return Result.Failed;
             }
 
@@ -39,7 +47,8 @@ namespace TYBIM_2025.AutoBuild
                     .OfClass(typeof(FloorType))
                     .FirstElementId();
 
-                if (defaultFloorTypeId == null || defaultFloorTypeId == ElementId.InvalidElementId) return Result.Failed;
+                if (defaultFloorTypeId == null || defaultFloorTypeId == ElementId.InvalidElementId)
+                    throw new InvalidOperationException("專案中找不到樓板類型。請先建立或移轉一個樓板類型。");
 
                 // Plan views build only their associated level; 3D retains all levels.
                 List<Level> levels = isFloorPlan
@@ -53,7 +62,7 @@ namespace TYBIM_2025.AutoBuild
                 IList<Element> boundaryElements = GetBoundaryElements(doc);
                 if (!boundaryElements.Any())
                 {
-                    TaskDialog.Show("自動翻板", "沒有找到本機模型的樑、基本牆或柱。此功能需要 Revit 構件實體；CAD 線條或連結模型不會作為建板邊界。");
+                    message = "找不到本機模型的樑、基本牆或柱。請先在本機模型建立會圍合樓板的 Revit 元件。";
                     return Result.Failed;
                 }
 
@@ -61,6 +70,7 @@ namespace TYBIM_2025.AutoBuild
                 int skippedFloorsCount = 0;
                 int failedFloorsCount = 0;
                 var diagnostics = new List<string>();
+                var floorErrors = new List<string>();
                 var overlapGuard = new FloorOverlapGuard(doc);
 
                 using (Transaction trans = new Transaction(doc, "自動翻板"))
@@ -77,31 +87,35 @@ namespace TYBIM_2025.AutoBuild
                     {
                         foreach (CurveLoop profile in FloorRegionBuilder.GetProfiles(boundaryElements, level, diagnostics))
                         {
-                            FloorCreationResult result = overlapGuard.TryCreate(doc, profile, defaultFloorTypeId, level.Id);
+                            FloorCreationResult result = overlapGuard.TryCreate(doc, profile, defaultFloorTypeId, level.Id, out string reason);
                             if (result == FloorCreationResult.Created) createdFloorsCount++;
                             else if (result == FloorCreationResult.Overlap) skippedFloorsCount++;
-                            else failedFloorsCount++;
+                            else
+                            {
+                                failedFloorsCount++;
+                                floorErrors.Add($"樓層 {level.Name}：{reason}");
+                            }
                         }
                     }
 
-                    if (trans.Commit() != TransactionStatus.Committed)
-                    {
-                        TaskDialog.Show("自動翻板", "樓板交易未成功提交，請檢查 Revit 的錯誤訊息。");
-                        return Result.Failed;
-                    }
+                    CommandErrors.Commit(trans);
                 }
 
                 var summary = new TaskDialog("自動翻板");
                 summary.MainInstruction = $"成功生成 {createdFloorsCount} 塊樓板。\n失敗／跳過 {skippedFloorsCount + failedFloorsCount} 處（重疊 {skippedFloorsCount}；建立或檢查失敗 {failedFloorsCount}）。"
                     + (createdFloorsCount + skippedFloorsCount + failedFloorsCount == 0 ? "\n未找到可建立樓板的封閉區域。" : "");
-                if (diagnostics.Count > 0) summary.ExpandedContent = string.Join("\n", diagnostics);
+                if (floorErrors.Count > 0)
+                    summary.MainContent = floorErrors[0] + "\n請檢查該樓層的封閉邊界、樓板類型與既有樓板。";
+                var details = floorErrors.Concat(diagnostics).Distinct().ToArray();
+                if (details.Length > 0) summary.ExpandedContent = string.Join("\n", details.Take(20))
+                    + (details.Length > 20 ? $"\n另有 {details.Length - 20} 則明細。" : "");
                 summary.Show();
                 return Result.Succeeded;
             }
+            catch (Autodesk.Revit.Exceptions.OperationCanceledException) { throw; }
             catch (Exception ex)
             {
-                TaskDialog.Show("Revit API 錯誤", ex.ToString());
-                return Result.Failed;
+                throw new InvalidOperationException("計算樓板邊界或建立樓板時發生錯誤。", ex);
             }
         }
 

@@ -70,6 +70,8 @@
     </EmbeddedResource>
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="..\TYBIM\Common\CommandErrors.cs" Link="Common\CommandErrors.cs" />
     <EmbeddedResource Include="Pic\TYBIM.ico" LogicalName="TYBIM.WindowIcon" />
+    <EmbeddedResource Include="Pic\自動接合.png" LogicalName="TYBIM.AutoJoinImage" />
   </ItemGroup>
 </Project>

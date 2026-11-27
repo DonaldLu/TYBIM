@@ -56,7 +56,9 @@ namespace TYBIM.AutoBuild
         internal static List<CadWallLine> doorRadii = new List<CadWallLine>();
         internal static List<CadWallLine> wallLines = new List<CadWallLine>();
         internal static Dictionary<string, int> unsupportedWallCurves = new Dictionary<string, int>();
+        internal static Dictionary<ElementId, Dictionary<string, int>> unsupportedBeamCurves = new Dictionary<ElementId, Dictionary<string, int>>();
         internal static Document cadDocument;
+        internal static ElementId beamViewId;
         private readonly Dictionary<string, ElementId> wallTypes = new Dictionary<string, ElementId>();
         private readonly Dictionary<string, ElementId> familyTypes = new Dictionary<string, ElementId>();
         private readonly string elementType;
@@ -93,6 +95,11 @@ namespace TYBIM.AutoBuild
         public LayersForm(UIDocument uidoc, string elementType)
         {
             this.elementType = elementType;
+            if (elementType == "樑")
+            {
+                options.ComputeReferences = false;
+                options.IncludeNonVisibleObjects = false;
+            }
             InitializeComponent();
             ConfigureLayout();
 
@@ -111,6 +118,14 @@ namespace TYBIM.AutoBuild
             CreateLayerNames(layers); // 建立圖層名稱
 
             if (elementType == "牆") ConfigureWallSelection();
+            if (elementType == "樑")
+            {
+                allRbtn.Checked = false;
+                foreach (ListViewItem item in listView1.Items)
+                    item.Checked = BeamGeometry.IsSuggestedLayer(item.Text);
+                groupBox1.Text = "DWG 圖層（已勾選辨識到的樑圖層）";
+                sureBtn.Text = "預覽樑";
+            }
             if (elementType == "柱" || elementType == "牆")
             {
                 groupBox1.Visible = false;
@@ -295,11 +310,17 @@ namespace TYBIM.AutoBuild
             wallLines.Clear();
             doorRadii.Clear();
             unsupportedWallCurves.Clear();
+            unsupportedBeamCurves.Clear();
             cadDocument = doc;
+            if (elementType == "樑")
+            {
+                beamViewId = doc.ActiveView.Id;
+                layers.Clear();
+            }
             List<ImportInstance> importInstances = new FilteredElementCollector(doc, doc.ActiveView.Id).OfClass(typeof(ImportInstance)).Cast<ImportInstance>().Where(x => x.Category != null).ToList();
             foreach (ImportInstance importInstance in importInstances)
             {
-                if (importInstance.IsLinked)
+                if (importInstance.IsLinked && (elementType != "樑" || !importInstance.IsHidden(doc.ActiveView)))
                 {
                     if (elementType == "牆")
                         foreach (Category category in importInstance.Category.SubCategories)
@@ -312,6 +333,8 @@ namespace TYBIM.AutoBuild
 
             return layers;
         }
+
+        internal void RefreshBeamCad(Document doc) { GetCADLayerLines(doc); }
         // CAD solid fills can arrive as planar faces or triangulated meshes.
         // Only their perimeter is a potential column outline.
         private void ReadColumnFace(Document doc, Face face, Transform transform, string fallback, ElementId importId, Dictionary<string, CadWallLine> boundary)
@@ -354,7 +377,8 @@ namespace TYBIM.AutoBuild
             }
             wallLines.AddRange(boundary.Values);
         }
-        private void ReadCadGeometry(Document doc, GeometryElement geometry, Transform transform, string inheritedLayer, ElementId importId)
+        private void ReadCadGeometry(Document doc, GeometryElement geometry, Transform transform, string inheritedLayer, ElementId importId,
+            int instanceDepth = 0)
         {
             if (geometry == null) return;
             foreach (GeometryObject obj in geometry)
@@ -363,9 +387,11 @@ namespace TYBIM.AutoBuild
                 string layer = style?.GraphicsStyleCategory?.Name ?? inheritedLayer;
                 if (elementType == "牆" && layer == "0" && inheritedLayer != null && WallRegionGeometry.IsOpeningLayer(inheritedLayer))
                     layer = inheritedLayer;
+                if (elementType == "樑" && layer == "0" && instanceDepth > 1 && !string.IsNullOrEmpty(inheritedLayer))
+                    layer = inheritedLayer;
                 if (obj is GeometryInstance instance)
                 {
-                    ReadCadGeometry(doc, instance.GetSymbolGeometry(), transform.Multiply(instance.Transform), layer, importId);
+                    ReadCadGeometry(doc, instance.GetSymbolGeometry(), transform.Multiply(instance.Transform), layer, importId, instanceDepth + 1);
                     continue;
                 }
                 if (elementType == "柱" || elementType == "牆")
@@ -413,6 +439,13 @@ namespace TYBIM.AutoBuild
                 {
                     if (!unsupportedWallCurves.ContainsKey(layer)) unsupportedWallCurves[layer] = 0;
                     unsupportedWallCurves[layer]++;
+                    if (elementType == "樑")
+                    {
+                        if (!unsupportedBeamCurves.TryGetValue(importId, out var counts))
+                            unsupportedBeamCurves.Add(importId, counts = new Dictionary<string, int>());
+                        counts.TryGetValue(layer, out int count);
+                        counts[layer] = count + 1;
+                    }
                     layers.Add(layer);
                 }
             }
@@ -495,33 +528,32 @@ namespace TYBIM.AutoBuild
             try
             {
                 selectedLayers = listView1.CheckedItems.Cast<ListViewItem>().Select(item => item.Text).ToList();
-                if (elementType == "樑" && selectedLayers.Count == 0)
-                {
-                    MessageBox.Show("請至少選擇一個圖層。");
-                    return;
-                }
                 byLevel = byLevelCB.Checked;
                 b_level_name = b_level_comboBox.Text;
                 t_level_name = t_level_comboBox.Text;
+                ExternalEventRequest request;
                 if (elementType == "柱")
                 {
                     columnImportId = familyTypes[type_comboBox.Text];
-                    m_externalEvent_CreateColumns.Raise();
+                    request = m_externalEvent_CreateColumns.Raise();
                 }
                 else if (elementType == "樑")
                 {
                     beamSymbolId = familyTypes[type_comboBox.Text];
-                    m_externalEvent_CreateBeams.Raise();
+                    request = m_externalEvent_CreateBeams.Raise();
                 }
                 else
                 {
                     wallTypeId = type_comboBox.SelectedIndex == 0 ? ElementId.InvalidElementId : wallTypes[type_comboBox.Text];
-                    m_externalEvent_CreateWalls.Raise();
+                    request = m_externalEvent_CreateWalls.Raise();
                 }
+
+                if (request != ExternalEventRequest.Accepted)
+                    MessageBox.Show($"Revit 尚未接受這次作業（狀態：{request}）。請等上一個作業結束，關閉其他 Revit 對話框後再重試。", "自動翻模");
             }
             catch (Exception ex)
             {
-                MessageBox.Show("發生錯誤: " + ex.Message);
+                MessageBox.Show($"無法送出自動翻模作業。\n原因：{ex.Message}\n請確認目前文件、DWG 圖層和所選類型後再重試。", "自動翻模");
             }
         }
         // 取消

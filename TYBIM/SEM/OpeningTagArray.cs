@@ -1,9 +1,11 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Autodesk.Revit.Attributes;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
+
+using TYBIM.Diagnostics;
 
 namespace TYBIM.SEM
 {
@@ -14,6 +16,12 @@ namespace TYBIM.SEM
     public class OpeningTagArray : IExternalCommand
     {
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
+        {
+            return CommandErrors.Execute("標籤排序", "請在含有開口或套管標籤的平面視圖中重試。",
+                commandData, ref message, elements, ExecuteCore);
+        }
+
+        private Result ExecuteCore(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
             UIApplication uiapp = commandData.Application;
             UIDocument uidoc = uiapp.ActiveUIDocument;
@@ -76,7 +84,7 @@ namespace TYBIM.SEM
                 TagOrthogonalEngine engine = new TagOrthogonalEngine(doc, activeView);
                 int processedCount = engine.ArrangeTags(tags, fixedTags, hostElements);
 
-                trans.Commit();
+                CommandErrors.Commit(trans);
                 TaskDialog.Show("成功",
                     $"已完成 {processedCount} 個未開啟引線標籤的排版；保留 {fixedTags.Count} 個已完成標籤不變。");
             }

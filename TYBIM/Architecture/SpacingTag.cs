@@ -8,6 +8,8 @@ using Autodesk.Revit.UI;
 using Autodesk.Revit.UI.Selection;
 using Forms = System.Windows.Forms;
 
+using TYBIM.Diagnostics;
+
 namespace TYBIM.Architecture
 {
     /// <summary>Creates an associative chain dimension, using real model face references only.</summary>
@@ -18,6 +20,12 @@ namespace TYBIM.Architecture
         private const double ParallelTolerance = 1e-8;
 
         public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
+        {
+            return CommandErrors.Execute("間距標籤", "請確認目標平面視圖、線性尺寸類型，以及所選元件是否提供可標註的參考面。",
+                commandData, ref message, elements, ExecuteCore);
+        }
+
+        private Result ExecuteCore(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
             UIDocument ui = commandData.Application.ActiveUIDocument;
             if (ui == null) return Result.Cancelled;
@@ -206,9 +214,7 @@ namespace TYBIM.Architecture
                 catch (Autodesk.Revit.Exceptions.OperationCanceledException) { return Result.Cancelled; }
                 catch (Exception ex)
                 {
-                    message = ex.Message;
-                    TaskDialog.Show("間距標籤", "無法建立尺寸。\n" + ex.Message);
-                    return Result.Failed;
+                    throw new InvalidOperationException("建立間距尺寸時發生錯誤。", ex);
                 }
             }
         }

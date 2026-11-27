@@ -11,6 +11,7 @@ namespace TYBIM_2025.AutoBuild
     {
         private const double Tolerance = 1e-5; // Feet, about 0.003 mm.
         private PathGeometry occupied;
+        private readonly List<(Point A, Point B)> inputEdges = new List<(Point, Point)>();
 
         public void Add(IEnumerable<IList<Point>> loops)
         {
@@ -18,6 +19,8 @@ namespace TYBIM_2025.AutoBuild
             foreach (IList<Point> points in loops)
             {
                 if (points.Count < 3) continue;
+                for (int i = 0; i < points.Count; i++)
+                    inputEdges.Add((points[i], points[(i + 1) % points.Count]));
                 var figure = new PathFigure { StartPoint = points[0], IsClosed = true, IsFilled = true };
                 figure.Segments.Add(new PolyLineSegment(points.Skip(1), true));
                 footprint.Figures.Add(figure);
@@ -42,7 +45,37 @@ namespace TYBIM_2025.AutoBuild
             return result;
         }
 
-        internal int CloseSmallGaps(double maximumGap)
+        // WPF can separate coincident faces during successive unions. Seat a short
+        // strip across the middle of their shared span using original coordinates.
+        internal void StabilizeContacts()
+        {
+            var edges = inputEdges.ToArray();
+            const double seat = 0.0003; // feet; about 0.09 mm into each member
+            for (int i = 0; i < edges.Length; i++)
+            {
+                var a = edges[i];
+                Vector axis = a.B - a.A;
+                double length = axis.Length;
+                if (length < seat * 4) continue;
+                axis /= length;
+                var normal = new Vector(-axis.Y, axis.X);
+                for (int j = i + 1; j < edges.Length; j++)
+                {
+                    var b = edges[j];
+                    if (Math.Abs((b.A - a.A) * normal) > Tolerance ||
+                        Math.Abs((b.B - a.A) * normal) > Tolerance) continue;
+                    double u = (b.A - a.A) * axis, v = (b.B - a.A) * axis;
+                    if (u <= v) continue;
+                    double lo = Math.Max(0, v), hi = Math.Min(length, u);
+                    if (hi - lo < seat * 4) continue;
+                    Point p = a.A + axis * (lo + seat), q = a.A + axis * (hi - seat);
+                    Add(new[] { new[] { p - normal * seat, q - normal * seat,
+                        q + normal * seat, p + normal * seat } });
+                }
+            }
+        }
+
+        internal int CloseSmallGaps(double maximumGap, Func<Point, Vector, bool> acceptJoint = null)
         {
             var edges = new List<(Point Start, Point End)>();
             var boundaries = ReadBoundaries();
@@ -87,7 +120,7 @@ namespace TYBIM_2025.AutoBuild
 
                     Point midpoint = nearStart + (nearEnd - nearStart) * 0.5
                         + normal * ((gapStart + gapEnd) * 0.25);
-                    if (!IsOccupied(midpoint))
+                    if (!IsOccupied(midpoint) && (acceptJoint == null || acceptJoint(midpoint, normal)))
                     {
                         // Give the union an actual overlap on both ends instead of relying on
                         // numerically identical edges after projecting the bridge.

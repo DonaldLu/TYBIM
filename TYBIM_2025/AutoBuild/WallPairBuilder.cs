@@ -215,7 +215,7 @@ namespace TYBIM_2025.AutoBuild
         }
 
         // 每條線往法向正側找相鄰的平行線：較近的線會遮住較遠的線，只有中間沒有其他線的部分才配對
-        private static void Pair(Cluster cluster, double maxThickness)
+        private static void Pair(Cluster cluster, double maxThickness, double minThickness = MinThickness)
         {
             var lines = cluster.Lines;
             for (int i = 0; i < lines.Count; i++)
@@ -233,7 +233,7 @@ namespace TYBIM_2025.AutoBuild
                         double a = Math.Max(span.Item1, lo), b = Math.Min(span.Item2, hi);
                         if (b - a > Collinear)
                         {
-                            if (gap >= MinThickness) cluster.Strips.Add(new Strip { I = lines[i], J = lines[j], Lo = a, Hi = b, Gap = gap });
+                            if (gap >= minThickness) cluster.Strips.Add(new Strip { I = lines[i], J = lines[j], Lo = a, Hi = b, Gap = gap });
                             if (a - span.Item1 > Collinear) next.Add(Tuple.Create(span.Item1, a));
                             if (span.Item2 - b > Collinear) next.Add(Tuple.Create(b, span.Item2));
                         }
@@ -241,6 +241,34 @@ namespace TYBIM_2025.AutoBuild
                     }
                     open = next;
                 }
+            }
+        }
+
+        internal static IEnumerable<(Segment Axis, double Width)> BuildBeamAxes(List<Segment> edges,
+            double minimumWidth, double maximumWidth)
+        {
+            var ends = new EndpointIndex(edges);
+            foreach (var cluster in Clusters(edges))
+            {
+                Pair(cluster, maximumWidth, minimumWidth);
+                MarkPatterns(cluster.Strips);
+                var plausible = cluster.Strips.Where(s => !s.Pattern && s.Hi - s.Lo >= 2 * s.Gap)
+                    .Where(s =>
+                    {
+                        var a0 = Frame(cluster, s.Lo, s.I.Offset);
+                        var b0 = Frame(cluster, s.Lo, s.J.Offset);
+                        var a1 = Frame(cluster, s.Hi, s.I.Offset);
+                        var b1 = Frame(cluster, s.Hi, s.J.Offset);
+                        return !(ends.Has(a0, b0) && ends.Has(a1, b1) && (ends.Has(a0, b1) || ends.Has(b0, a1)));
+                    }).ToList();
+                // A rail shared by two equally plausible spans is ambiguous.
+                var starts = plausible.ToLookup(s => s.I.Id);
+                var endsAt = plausible.ToLookup(s => s.J.Id);
+                plausible = plausible.Where(s => !endsAt[s.I.Id].Concat(starts[s.J.Id])
+                    .Any(other => Similar(s.Gap, other.Gap) && Overlaps(s, other))).ToList();
+                // Merge contiguous spans without bridging missing CAD geometry or extending to intersections.
+                foreach (var beam in Merge(cluster, KeepThinner(plausible), 0, "", ends))
+                    yield return (new Segment(At(beam, beam.Lo), At(beam, beam.Hi)), beam.Thickness);
             }
         }
 
