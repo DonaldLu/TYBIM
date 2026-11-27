@@ -69,4 +69,7 @@
       <LastGenOutput>Resources.Designer.cs</LastGenOutput>
     </EmbeddedResource>
   </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Pic\TYBIM.ico" LogicalName="TYBIM.WindowIcon" />
+  </ItemGroup>
 </Project>

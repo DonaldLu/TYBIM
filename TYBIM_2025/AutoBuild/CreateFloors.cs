@@ -1,4 +1,4 @@
-﻿using Autodesk.Revit.ApplicationServices;
+using Autodesk.Revit.ApplicationServices;
 using Autodesk.Revit.Attributes;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
@@ -11,11 +11,15 @@ namespace TYBIM_2025.AutoBuild
     [Transaction(TransactionMode.Manual)]
     [Regeneration(RegenerationOption.Manual)]
     [Journaling(JournalingMode.NoCommandData)]
-    public class CreateFloors : IExternalEventHandler
+    public class CreateFloors : IExternalCommand
     {
-        public void Execute(UIApplication uiapp)
+
+        public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
         {
-            Application app = uiapp.Application; Document doc = uiapp.ActiveUIDocument.Document;
+            UIApplication uiapp = commandData.Application;
+            UIDocument uidoc = uiapp.ActiveUIDocument;
+            Application app = uiapp.Application;
+            Document doc = uidoc.Document;
             View view = doc.ActiveView;
 
             ViewPlan plan = view as ViewPlan;
@@ -26,7 +30,7 @@ namespace TYBIM_2025.AutoBuild
             if (!(view is View3D) && !isFloorPlan)
             {
                 TaskDialog.Show("提示", "請在樓層平面、結構平面或 3D 視圖中執行此功能。");
-                return;
+                return Result.Failed;
             }
 
             try
@@ -35,7 +39,7 @@ namespace TYBIM_2025.AutoBuild
                     .OfClass(typeof(FloorType))
                     .FirstElementId();
 
-                if (defaultFloorTypeId == null || defaultFloorTypeId == ElementId.InvalidElementId) return;
+                if (defaultFloorTypeId == null || defaultFloorTypeId == ElementId.InvalidElementId) return Result.Failed;
 
                 // Plan views build only their associated level; 3D retains all levels.
                 List<Level> levels = isFloorPlan
@@ -45,13 +49,12 @@ namespace TYBIM_2025.AutoBuild
                         .Cast<Level>()
                         .OrderBy(l => l.Elevation)
                         .ToList();
-                string scopeName = isFloorPlan ? plan.GenLevel.Name + " 樓層" : "3D 視圖各樓層";
 
-                IList<Element> allFramingElems = GetColumnsAndBeams(doc);
-                if (!allFramingElems.Any())
+                IList<Element> boundaryElements = GetBoundaryElements(doc);
+                if (!boundaryElements.Any())
                 {
-                    TaskDialog.Show("自動翻板", "沒有找到本機模型的柱樑。此功能需要 Revit 柱樑實體；CAD 線條或連結模型不會作為建板邊界。");
-                    return;
+                    TaskDialog.Show("自動翻板", "沒有找到本機模型的樑、基本牆或柱。此功能需要 Revit 構件實體；CAD 線條或連結模型不會作為建板邊界。");
+                    return Result.Failed;
                 }
 
                 int createdFloorsCount = 0;
@@ -72,7 +75,7 @@ namespace TYBIM_2025.AutoBuild
 
                     foreach (Level level in levels)
                     {
-                        foreach (CurveLoop profile in FloorRegionBuilder.GetProfiles(allFramingElems, level, diagnostics))
+                        foreach (CurveLoop profile in FloorRegionBuilder.GetProfiles(boundaryElements, level, diagnostics))
                         {
                             FloorCreationResult result = overlapGuard.TryCreate(doc, profile, defaultFloorTypeId, level.Id);
                             if (result == FloorCreationResult.Created) createdFloorsCount++;
@@ -84,109 +87,41 @@ namespace TYBIM_2025.AutoBuild
                     if (trans.Commit() != TransactionStatus.Committed)
                     {
                         TaskDialog.Show("自動翻板", "樓板交易未成功提交，請檢查 Revit 的錯誤訊息。");
-                        return;
+                        return Result.Failed;
                     }
                 }
 
-                TaskDialog.Show("自動翻板", $"成功生成 {createdFloorsCount} 塊樓板。\n失敗／跳過 {skippedFloorsCount + failedFloorsCount} 處（重疊 {skippedFloorsCount}；建立或檢查失敗 {failedFloorsCount}）。"
-                    + (createdFloorsCount + skippedFloorsCount + failedFloorsCount == 0 ? "\n未找到可建立樓板的封閉區域。" : ""));
-                return;
+                var summary = new TaskDialog("自動翻板");
+                summary.MainInstruction = $"成功生成 {createdFloorsCount} 塊樓板。\n失敗／跳過 {skippedFloorsCount + failedFloorsCount} 處（重疊 {skippedFloorsCount}；建立或檢查失敗 {failedFloorsCount}）。"
+                    + (createdFloorsCount + skippedFloorsCount + failedFloorsCount == 0 ? "\n未找到可建立樓板的封閉區域。" : "");
+                if (diagnostics.Count > 0) summary.ExpandedContent = string.Join("\n", diagnostics);
+                summary.Show();
+                return Result.Succeeded;
             }
             catch (Exception ex)
             {
                 TaskDialog.Show("Revit API 錯誤", ex.ToString());
-                return;
+                return Result.Failed;
             }
         }
 
         // --- 輔助方法 ---
 
-        private IList<Element> GetColumnsAndBeams(Document doc)
+        private IList<Element> GetBoundaryElements(Document doc)
         {
             ElementCategoryFilter columnsFilter = new ElementCategoryFilter(BuiltInCategory.OST_StructuralColumns);
             ElementCategoryFilter beamsFilter = new ElementCategoryFilter(BuiltInCategory.OST_StructuralFraming);
             ElementCategoryFilter architecturalColumnsFilter = new ElementCategoryFilter(BuiltInCategory.OST_Columns);
-            LogicalOrFilter filter = new LogicalOrFilter(new List<ElementFilter> { columnsFilter, architecturalColumnsFilter, beamsFilter });
+            LogicalOrFilter filter = new LogicalOrFilter(new List<ElementFilter> { columnsFilter, architecturalColumnsFilter, beamsFilter, new ElementCategoryFilter(BuiltInCategory.OST_Walls) });
 
             // Plan visibility/view range may exclude beams needed to close the slab boundary.
             // Collect the model for plan mode, then filter by the target level's elevation.
-            FilteredElementCollector collector = doc.ActiveView is ViewPlan
-                ? new FilteredElementCollector(doc)
-                : new FilteredElementCollector(doc, doc.ActiveView.Id);
+            FilteredElementCollector collector = new FilteredElementCollector(doc);
             return collector
                 .WherePasses(filter)
                 .WhereElementIsNotElementType()
+                .Where(element => !(element is Wall wall) || wall.WallType.Kind == WallKind.Basic)
                 .ToList();
-        }
-
-        /// <summary>
-        /// 3D視圖中畫模型線
-        /// </summary>
-        /// <param name="doc"></param>
-        /// <param name="curve"></param>
-        private int DrawLine(Document doc, Curve curve)
-        {
-            int i = 0;
-            try
-            {
-                Line line = Line.CreateBound(curve.Tessellate()[0], curve.Tessellate()[curve.Tessellate().Count - 1]);
-                XYZ normal = new XYZ(line.Direction.Z - line.Direction.Y, line.Direction.X - line.Direction.Z, line.Direction.Y - line.Direction.X); // 使用與線不平行的任意向量
-                Plane plane = Plane.CreateByNormalAndOrigin(normal, curve.Tessellate()[0]);
-                SketchPlane sketchPlane = SketchPlane.Create(doc, plane);
-                ModelCurve modelCurve = doc.Create.NewModelCurve(line, sketchPlane);
-                i = 1;
-            }
-            catch (Exception ex) { string error = ex.Message + "\n" + ex.ToString(); }
-
-            return i;
-        }
-        // 關閉警示視窗 
-        public class CloseWarnings : IFailuresPreprocessor
-        {
-            FailureProcessingResult IFailuresPreprocessor.PreprocessFailures(FailuresAccessor failuresAccessor)
-            {
-                string transactionName = failuresAccessor.GetTransactionName();
-                IList<FailureMessageAccessor> fmas = failuresAccessor.GetFailureMessages();
-                if (fmas.Count == 0) { return FailureProcessingResult.Continue; }
-                if (transactionName.Equals("EXEMPLE"))
-                {
-                    foreach (FailureMessageAccessor fma in fmas)
-                    {
-                        if (fma.GetSeverity() == FailureSeverity.Error)
-                        {
-                            failuresAccessor.DeleteAllWarnings();
-                            return FailureProcessingResult.ProceedWithRollBack;
-                        }
-                        else { failuresAccessor.DeleteWarning(fma); }
-                    }
-                }
-                else
-                {
-                    foreach (FailureMessageAccessor fma in fmas) { failuresAccessor.DeleteAllWarnings(); }
-                }
-                return FailureProcessingResult.Continue;
-            }
-        }
-        // 更新Revit項目, Family有一個新的類型
-        class LoadOpts : IFamilyLoadOptions
-        {
-            public bool OnFamilyFound(bool familyInUse, out bool overwriteParameterValues)
-            {
-                overwriteParameterValues = true;
-                return true;
-            }
-
-            public bool OnSharedFamilyFound(Family sharedFamily, bool familyInUse, out FamilySource source, out bool overwriteParameterValues)
-            {
-                source = FamilySource.Family;
-                overwriteParameterValues = true;
-                return true;
-            }
-        }
-
-        public string GetName()
-        {
-            return "自動翻板";
         }
     }
 }

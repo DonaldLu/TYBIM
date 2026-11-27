@@ -1,4 +1,4 @@
-﻿using Autodesk.Revit.DB;
+using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
 using System;
 using System.Collections.Generic;
@@ -6,8 +6,14 @@ using System.Linq;
 
 namespace TYBIM.AutoBuild
 {
-    public class CreateWalls : IExternalEventHandler
+    [Autodesk.Revit.Attributes.Transaction(Autodesk.Revit.Attributes.TransactionMode.Manual)]
+    public class CreateWalls : IExternalCommand, IExternalEventHandler
     {
+        public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
+        {
+            return LayersForm.OpenForm(commandData, "牆");
+        }
+
         public void Execute(UIApplication app)
         {
             if (app.ActiveUIDocument == null) return;
@@ -34,81 +40,125 @@ namespace TYBIM.AutoBuild
             double minimumLength = Math.Max(app.Application.ShortCurveTolerance, tolerance);
             double maxThickness = UnitUtils.ConvertToInternalUnits(1000, UnitTypeId.Millimeters);
             var selected = new HashSet<string>(LayersForm.selectedLayers);
-            int unsupported = LayersForm.unsupportedWallCurves.Where(p => selected.Contains(p.Key)).Sum(p => p.Value);
+            int unsupported = 0;
             var centerLines = new List<WallRegionGeometry.Segment>();
             var stories = LayersForm.byLevel ? levels.Where(l => l.Elevation >= bottom.Elevation && l.Elevation <= top.Elevation)
                 .GroupBy(l => l.Elevation).Select(g => g.First()).ToList() : new List<Level> { bottom, top };
             stories[0] = bottom; stories[stories.Count - 1] = top;
             var heights = stories.Take(stories.Count - 1).Select(level => level.ProjectElevation + 10 / 304.8).ToList();
             var columnFaces = ColumnWallCaps.ReadFaces(doc, heights);
-            var inferred = new List<WallRegionGeometry.Segment>();
-            int regions = 0, openEdges = 0, invalidLoops = 0, nonPlanar = 0, joinedOpenings = 0;
-            // Keep separate DWG placements separate while reconstructing their regions.
-            foreach (var import in LayersForm.wallLines.Where(l => selected.Contains(l.Layer)).GroupBy(l => l.ImportId))
-            {
-                var input = new List<WallRegionGeometry.Segment>();
-                var openings = new List<WallRegionGeometry.Segment>();
-                foreach (var line in import)
-                {
-                    if (Math.Abs(line.Start.Z - line.End.Z) > tolerance) { nonPlanar++; continue; }
-                    var target = WallRegionGeometry.IsOpeningLayer(line.Layer) ? openings : input;
-                    target.Add(new WallRegionGeometry.Segment(new WallRegionGeometry.Point(line.Start.X, line.Start.Y),
-                        new WallRegionGeometry.Point(line.End.X, line.End.Y)));
-                }
-                var geometry = input.Count == 0 ? WallRegionGeometry.Build(openings, tolerance, maxThickness) :
-                    WallRegionGeometry.BuildWithOpenings(input, openings, tolerance, maxThickness);
-                joinedOpenings += geometry.JoinedOpenings;
-                openEdges += geometry.OpenEdges;
-                bool valid = true;
-                foreach (var boundary in geometry.Boundaries)
-                {
-                    try
-                    {
-                        var curves = new List<Curve>();
-                        for (int i = 0; i < boundary.Count; i++)
-                        {
-                            var a = boundary[i]; var b = boundary[(i + 1) % boundary.Count];
-                            curves.Add(Line.CreateBound(new XYZ(a.X, a.Y, bottom.Elevation), new XYZ(b.X, b.Y, bottom.Elevation)));
-                        }
-                        CurveLoop loop = CurveLoop.Create(curves);
-                        if (loop.IsOpen() || !loop.HasPlane()) throw new InvalidOperationException("邊界不封閉或不共平面");
-                        regions++;
-                    }
-                    catch (Exception) { valid = false; invalidLoops++; }
-                }
-                if (!valid) continue;
-                centerLines.AddRange(geometry.CenterLines);
-                var caps = ColumnWallCaps.Find(input, columnFaces, heights, maxThickness);
-                if (caps.Count > 0)
-                {
-                    var supplemented = WallRegionGeometry.BuildWithOpenings(input.Concat(caps), openings, tolerance, maxThickness);
-                    inferred.AddRange(supplemented.CenterLines);
-                }
-            }
-            centerLines = WallRegionGeometry.Merge(centerLines, tolerance).Where(s => s.Length > minimumLength).ToList();
             var additions = new List<WallRegionGeometry.Segment>();
-            foreach (var candidate in WallRegionGeometry.Merge(inferred, tolerance).Where(s => s.Length > minimumLength))
+            int regions = 0, openEdges = 0, invalidLoops = 0, nonPlanar = 0, joinedOpenings = 0;
+            void Recalculate(HashSet<string> selectedLayers)
             {
-                var direction = (candidate.B - candidate.A) * (1 / candidate.Length);
-                bool Overlaps(WallRegionGeometry.Segment other)
+                centerLines.Clear();
+                additions.Clear();
+                regions = openEdges = invalidLoops = nonPlanar = joinedOpenings = 0;
+                unsupported = LayersForm.unsupportedWallCurves.Where(p => selectedLayers.Contains(p.Key)).Sum(p => p.Value);
+                var inferred = new List<WallRegionGeometry.Segment>();
+                // Keep separate DWG placements separate while reconstructing their regions.
+                foreach (var import in LayersForm.wallLines.Where(l => selectedLayers.Contains(l.Layer)).GroupBy(l => l.ImportId))
                 {
-                    var a = other.A - candidate.A;
-                    var b = other.B - candidate.A;
-                    if (Math.Abs(a.X * direction.Y - a.Y * direction.X) > tolerance ||
-                        Math.Abs(b.X * direction.Y - b.Y * direction.X) > tolerance) return false;
-                    double lo = a.X * direction.X + a.Y * direction.Y, hi = b.X * direction.X + b.Y * direction.Y;
-                    return Math.Min(candidate.Length, Math.Max(lo, hi)) - Math.Max(0, Math.Min(lo, hi)) > tolerance;
+                    var input = new List<WallRegionGeometry.Segment>();
+                    var rails = new List<KeyValuePair<string, WallRegionGeometry.Segment>>();
+                    var firstAxis = centerLines.Count;
+                    var openingRails = new List<WallRegionGeometry.Segment>();
+                    var openings = new List<WallRegionGeometry.Segment>();
+                    foreach (var line in import)
+                    {
+                        if (Math.Abs(line.Start.Z - line.End.Z) > tolerance) { nonPlanar++; continue; }
+                        var segment = new WallRegionGeometry.Segment(new WallRegionGeometry.Point(line.Start.X, line.Start.Y),
+                            new WallRegionGeometry.Point(line.End.X, line.End.Y));
+                        if (segment.Length <= tolerance) continue;
+                        if (WallRegionGeometry.IsOpeningLayer(line.Layer))
+                        {
+                            openings.Add(segment);
+                            if (line.Layer.IndexOf("OPEN", StringComparison.OrdinalIgnoreCase) >= 0 || line.Layer.Contains("開口"))
+                                openingRails.Add(segment);
+                        }
+                        else
+                        {
+                            input.Add(segment);
+                            rails.Add(new KeyValuePair<string, WallRegionGeometry.Segment>(line.Layer, segment));
+                        }
+                    }
+                    if (input.Count == 0) continue;
+                    var pairs = WallPairBuilder.Build(rails, maxThickness, tolerance, openings);
+                    var pairedAxes = new List<WallRegionGeometry.Segment>();
+                    foreach (var wall in pairs.Walls)
+                    {
+                        wall.Axis.WidthMm = (int)Math.Round(wall.Thickness * 304.8, MidpointRounding.AwayFromZero);
+                        pairedAxes.Add(wall.Axis);
+                    }
+                    centerLines.AddRange(pairedAxes);
+                    var geometry = WallRegionGeometry.Build(input, tolerance, maxThickness);
+                    joinedOpenings += pairs.Gaps.Count;
+                    openEdges += geometry.OpenEdges;
+                    bool valid = true;
+                    foreach (var boundary in geometry.Boundaries)
+                    {
+                        try
+                        {
+                            var curves = new List<Curve>();
+                            for (int i = 0; i < boundary.Count; i++)
+                            {
+                                var a = boundary[i]; var b = boundary[(i + 1) % boundary.Count];
+                                curves.Add(Line.CreateBound(new XYZ(a.X, a.Y, bottom.Elevation), new XYZ(b.X, b.Y, bottom.Elevation)));
+                            }
+                            CurveLoop loop = CurveLoop.Create(curves);
+                            if (loop.IsOpen() || !loop.HasPlane()) throw new InvalidOperationException("邊界不封閉或不共平面");
+                            regions++;
+                        }
+                        catch (Exception) { valid = false; invalidLoops++; }
+                    }
+                    if (!valid) continue;
+                    centerLines.AddRange(geometry.CenterLines.Where(axis => !pairedAxes.Any(pair => AlignedOverlap(axis, pair, tolerance))));
+                    var caps = ColumnWallCaps.Find(input, columnFaces, heights, maxThickness);
+                    if (caps.Count > 0)
+                    {
+                        var supplemented = WallRegionGeometry.Build(input.Concat(caps), tolerance, maxThickness);
+                        inferred.AddRange(supplemented.CenterLines);
+                    }
+                    var localAxes = centerLines.GetRange(firstAxis, centerLines.Count - firstAxis);
+                    centerLines.AddRange(WallRegionGeometry.OpeningHosts(openingRails, localAxes, tolerance));
+                    centerLines.AddRange(WallRegionGeometry.FramedOpeningHosts(openingRails, input,
+                        centerLines.GetRange(firstAxis, centerLines.Count - firstAxis), maxThickness, tolerance));
+                    var swingRadii = new List<WallRegionGeometry.Segment>();
+                    foreach (var radius in LayersForm.doorRadii.Where(r => r.ImportId == import.Key && selectedLayers.Contains(r.Layer)))
+                    {
+                        var gap = new WallRegionGeometry.Segment(new WallRegionGeometry.Point(radius.Start.X, radius.Start.Y),
+                            new WallRegionGeometry.Point(radius.End.X, radius.End.Y));
+                        swingRadii.Add(gap);
+                        var extension = WallRegionGeometry.SwingHost(gap, localAxes);
+                        if (extension != null) centerLines.Add(extension);
+                    }
+                    centerLines.AddRange(WallRegionGeometry.DoubleDoorHosts(swingRadii, localAxes));
                 }
-                if (!centerLines.Any(Overlaps)) { additions.Add(candidate); centerLines.Add(candidate); }
+                var merged = WallRegionGeometry.Merge(centerLines, tolerance).Where(s => s.Length > minimumLength).ToList();
+                centerLines.Clear();
+                centerLines.AddRange(merged);
+
+                foreach (var candidate in WallRegionGeometry.Merge(inferred, tolerance).Where(s => s.Length > minimumLength))
+                {
+                    var direction = (candidate.B - candidate.A) * (1 / candidate.Length);
+                    bool Overlaps(WallRegionGeometry.Segment other)
+                    {
+                        var a = other.A - candidate.A;
+                        var b = other.B - candidate.A;
+                        if (Math.Abs(a.X * direction.Y - a.Y * direction.X) > tolerance ||
+                            Math.Abs(b.X * direction.Y - b.Y * direction.X) > tolerance) return false;
+                        double lo = a.X * direction.X + a.Y * direction.Y, hi = b.X * direction.X + b.Y * direction.Y;
+                        return Math.Min(candidate.Length, Math.Max(lo, hi)) - Math.Max(0, Math.Min(lo, hi)) > tolerance;
+                }
+                    if (!centerLines.Any(Overlaps)) { additions.Add(candidate); centerLines.Add(candidate); }
+                }
             }
-            if (centerLines.Count == 0)
+            Recalculate(selected);
+            using (var iconStream = typeof(CreateWalls).Assembly.GetManifestResourceStream("TYBIM.WindowIcon"))
+            using (var icon = new System.Drawing.Icon(iconStream))
+            using (var preview = new WallPreview(LayersForm.wallLines, centerLines, stories.Count - 1, additions, automatic ? null : type.Width, selected, Recalculate))
             {
-                TaskDialog.Show("自動翻牆", "所選圖層未找到可建牆的封閉雙線區域。請確認邊界封閉、牆厚不超過 100 cm，且為直線輪廓。\n" +
-                    "未封閉線段：" + openEdges + "；無效邊界：" + invalidLoops + "；非水平線段：" + nonPlanar + "；已略過的 CAD 曲線：" + unsupported);
-                return;
-            }
-            using (var preview = new WallPreview(LayersForm.wallLines, centerLines, stories.Count - 1, additions))
-            {
+                preview.Icon = icon;
                 if (preview.ShowDialog() != System.Windows.Forms.DialogResult.OK) return;
                 centerLines.RemoveAll(preview.Excluded.Contains);
             }
@@ -204,6 +254,16 @@ namespace TYBIM.AutoBuild
             }
         }
 
+        private static bool AlignedOverlap(WallRegionGeometry.Segment axis, WallRegionGeometry.Segment pair, double tolerance)
+        {
+            var d = (axis.B - axis.A) * (1 / axis.Length);
+            var a = pair.A - axis.A;
+            var b = pair.B - axis.A;
+            if (Math.Abs(a.X * d.Y - a.Y * d.X) > tolerance || Math.Abs(b.X * d.Y - b.Y * d.X) > tolerance) return false;
+            double p = a.X * d.X + a.Y * d.Y, q = b.X * d.X + b.Y * d.Y;
+            return Math.Min(axis.Length, Math.Max(p, q)) - Math.Max(0, Math.Min(p, q)) > tolerance;
+        }
+
         private static WallType ResolveType(List<WallType> types, int mm)
         {
             if (mm <= 0) throw new InvalidOperationException("無法判定 CAD 牆厚。");
@@ -235,7 +295,3 @@ namespace TYBIM.AutoBuild
         public string GetName() { return "自動翻牆"; }
     }
 }
-
-
-
-

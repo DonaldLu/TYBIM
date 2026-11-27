@@ -19,6 +19,12 @@ namespace TYBIM.AutoBuild
             return best;
         }
 
+        // A wall ending at this level belongs to the story below.
+        internal static bool WallExtendsAboveLevel(double minZ, double maxZ, double levelZ, double tolerance)
+        {
+            return minZ <= levelZ + tolerance && maxZ > levelZ + tolerance;
+        }
+
         internal static bool IntersectsLevel(double minZ, double maxZ,
             double levelZ, double tolerance)
         {

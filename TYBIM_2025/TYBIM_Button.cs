@@ -38,22 +38,22 @@ namespace TYBIM_2025
                     }
                 }
             }
-            PushButton createColumnsBtn = ribbonPanel.AddItem(new PushButtonData("CreateColumns", "自動翻柱", addinAssmeblyPath, "TYBIM_2025.AutoBuild.Start")) as PushButton;
+            PushButton createColumnsBtn = ribbonPanel.AddItem(new PushButtonData("CreateColumns", "自動翻柱", addinAssmeblyPath, typeof(AutoBuild.CreateColumns).FullName)) as PushButton;
             createColumnsBtn.LargeImage = convertFromBitmap(Properties.Resources.自動翻柱);
             createColumnsBtn.ToolTip = "【功能介紹】\n讀取 DWG 圖層，依指定柱類型與樓層自動建立柱。";
             createColumnsBtn.LongDescription = "【使用步驟】\n1. 先將 DWG 匯入或連結至專案，再開啟「自動翻柱」。\n2. 勾選柱圖層，選擇柱類型、基準樓層及頂部樓層。\n3. 按「確定」建立，完成後檢查柱的位置與高度。";
             createColumnsBtn.ToolTipImage = convertFromBitmap(Properties.Resources.自動翻柱_原圖, 250);
-            PushButton createBeamsBtn = ribbonPanel.AddItem(new PushButtonData("CreateBeams", "自動翻樑", addinAssmeblyPath, "TYBIM_2025.AutoBuild.StartBeams")) as PushButton;
+            PushButton createBeamsBtn = ribbonPanel.AddItem(new PushButtonData("CreateBeams", "自動翻樑", addinAssmeblyPath, typeof(AutoBuild.CreateBeams).FullName)) as PushButton;
             createBeamsBtn.LargeImage = convertFromBitmap(Properties.Resources.自動翻樑);
             createBeamsBtn.ToolTip = "【功能介紹】\n讀取 DWG 圖層，依指定樑類型與參考樓層自動建立樑。";
             createBeamsBtn.LongDescription = "【使用步驟】\n1. 先將 DWG 匯入或連結至專案，再開啟「自動翻樑」。\n2. 勾選樑圖層，選擇樑類型與參考樓層。\n3. 按「確定」建立，完成後檢查樑的位置與方向。";
             createBeamsBtn.ToolTipImage = convertFromBitmap(Properties.Resources.自動翻樑_原圖, 250);
-            PushButton createFloorsBtn = ribbonPanel.AddItem(new PushButtonData("CreateFloors", "自動翻板", addinAssmeblyPath, "TYBIM_2025.AutoBuild.CreateFloor")) as PushButton;
+            PushButton createFloorsBtn = ribbonPanel.AddItem(new PushButtonData("CreateFloors", "自動翻板", addinAssmeblyPath, typeof(AutoBuild.CreateFloors).FullName)) as PushButton;
             createFloorsBtn.LargeImage = convertFromBitmap(Properties.Resources.自動翻板);
-            createFloorsBtn.ToolTip = "【功能介紹】\n依本機模型的柱樑封閉區域建立樓板，並跳過與既有樓板重疊的區域。";
-            createFloorsBtn.LongDescription = "【使用步驟】\n1. 確認專案已有 Revit 柱樑實體。\n2. 開啟樓層平面或結構平面以處理該樓層；開啟 3D 視圖則處理各樓層。\n3. 點選「自動翻板」，完成後查看建立與跳過數量。";
+            createFloorsBtn.ToolTip = "【功能介紹】\n依本機模型的樑、基本牆與柱所圍成的封閉區域建立樓板，並跳過與既有樓板重疊的區域。";
+            createFloorsBtn.LongDescription = "【使用步驟】\n1. 確認專案已有圍成封閉區域的 Revit 樑或基本牆，可搭配柱形成邊界。\n2. 開啟樓層平面或結構平面以處理該樓層；開啟 3D 視圖則處理各樓層。\n3. 點選「自動翻板」，完成後查看建立與跳過數量。";
             createFloorsBtn.ToolTipImage = convertFromBitmap(Properties.Resources.自動翻板_原圖, 250);
-            PushButton createWallsBtn = ribbonPanel.AddItem(new PushButtonData("CreateWalls", "自動翻牆", addinAssmeblyPath, "TYBIM_2025.AutoBuild.StartWalls")) as PushButton;
+            PushButton createWallsBtn = ribbonPanel.AddItem(new PushButtonData("CreateWalls", "自動翻牆", addinAssmeblyPath, typeof(AutoBuild.CreateWalls).FullName)) as PushButton;
             createWallsBtn.LargeImage = convertFromBitmap(Properties.Resources.自動翻牆);
             createWallsBtn.ToolTip = "【功能介紹】\n讀取 DWG 圖層中的封閉雙線區域，依指定基本牆類型與樓層自動建立牆。";
             createWallsBtn.LongDescription = "【使用步驟】\n1. 先將具有封閉雙線牆區域的 DWG 匯入或連結至專案。\n2. 開啟「自動翻牆」，勾選牆圖層，選擇基本牆類型、基準樓層及頂部樓層。\n3. 按「確定」建立，完成後檢查牆的位置與厚度。";

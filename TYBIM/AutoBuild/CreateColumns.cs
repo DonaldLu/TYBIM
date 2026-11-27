@@ -6,12 +6,19 @@ using Autodesk.Revit.DB;
 using Autodesk.Revit.DB.Structure;
 using Autodesk.Revit.DB.ExtensibleStorage;
 using Autodesk.Revit.UI;
+using D = System.Drawing;
 using F = System.Windows.Forms;
 
 namespace TYBIM.AutoBuild
 {
-    public class CreateColumns : IExternalEventHandler
+    [Autodesk.Revit.Attributes.Transaction(Autodesk.Revit.Attributes.TransactionMode.Manual)]
+    public class CreateColumns : IExternalCommand, IExternalEventHandler
     {
+        public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
+        {
+            return LayersForm.OpenForm(commandData, "柱");
+        }
+
         private const double Mm = 1.0 / 304.8;
         private const string Skip = "略過";
         private static readonly Guid MappingId = new Guid("de5f500c-1992-40d8-b4db-87b215ea23bc");
@@ -22,6 +29,9 @@ namespace TYBIM.AutoBuild
             public int Width, Depth;
             public double Angle;
         }
+
+        private static string ChoiceKey(Candidate c) =>
+            FormattableString.Invariant($"{c.Width}|{c.Depth}|{c.Frame}|{c.Layer}");
 
         private static string Vertex(XYZ p) =>
             Math.Round(p.X / Mm, 1) + "|" + Math.Round(p.Y / Mm, 1) + "|" + Math.Round(p.Z / Mm, 1);
@@ -115,10 +125,11 @@ namespace TYBIM.AutoBuild
         private static string Suggest(Candidate c, bool repeatedSection, Dictionary<string,List<FamilySymbol>> families)
         {
             string layer = c.Layer;
-            if (Regex.IsMatch(layer, @"DOOR|WINDOW|HATCH|OPEN|ROOM|FURN|門|窗|空間|家具|填充", RegexOptions.IgnoreCase))
+            if (Regex.IsMatch(layer, @"DOOR|WINDOW|OPEN|ROOM|FURN|門|窗|空間|家具", RegexOptions.IgnoreCase))
                 return Skip;
             bool named = Regex.IsMatch(layer, @"柱|(?:^|[-_ ])(?:COR|COL|COLS|COLUMN|COLUMNS)(?:$|[-_ ])", RegexOptions.IgnoreCase);
-            if (!named && !(TypicalSection(c) && repeatedSection)) return Skip;
+            if (!named && (Regex.IsMatch(layer, "HATCH|填充", RegexOptions.IgnoreCase) ||
+                !(TypicalSection(c) && repeatedSection))) return Skip;
             bool architectural = Regex.IsMatch(layer, @"建築柱|(?:^|[-_ ])A[-_ ](?:COL|COR)", RegexOptions.IgnoreCase);
             var choices = families.Where(f => Architectural(f.Value[0]) == architectural)
                 .Where(f => f.Value.Any(s => Matches(s,c)) || Dimensions(f.Value[0]).All(p => !p.IsReadOnly))
@@ -166,8 +177,14 @@ namespace TYBIM.AutoBuild
             var schema = Schema.Lookup(MappingId);
             var entity = schema == null ? null : doc.ProjectInformation.GetEntity(schema);
             var mappings = entity != null && entity.IsValid() ? entity.Get<IDictionary<string,string>>("Layers") : new Dictionary<string,string>();
+            var cad = doc.GetElement(LayersForm.columnImportId);
+            var cadEntity = schema == null ? null : cad.GetEntity(schema);
+            var choices = cadEntity != null && cadEntity.IsValid()
+                ? cadEntity.Get<IDictionary<string,string>>("Layers") : new Dictionary<string,string>();
             var groups = candidates.GroupBy(c=>new { c.Layer,c.Width,c.Depth,c.Frame }).OrderBy(g=>g.Key.Layer).Select(g=>g.ToList()).ToList();
-            using (var form = new F.Form { Text="翻柱預覽（同心框請擇一）", Width=920, Height=520, StartPosition=F.FormStartPosition.CenterScreen })
+            using (var iconStream = typeof(CreateColumns).Assembly.GetManifestResourceStream("TYBIM.WindowIcon"))
+            using (var icon = new D.Icon(iconStream))
+            using (var form = new F.Form { Text="翻柱預覽（同心框請擇一）", Icon=icon, Width=1020, Height=750, MinimumSize=new D.Size(760,540), StartPosition=F.FormStartPosition.CenterScreen })
             using (var grid = new F.DataGridView { Dock=F.DockStyle.Fill, AllowUserToAddRows=false, AllowUserToDeleteRows=false, RowHeadersVisible=false, AutoSizeColumnsMode=F.DataGridViewAutoSizeColumnsMode.Fill })
             {
                 foreach (string title in new[]{"CAD 圖層","寬 × 深 mm","輪廓數","已放置樓層筆數","輪廓提示"})
@@ -183,10 +200,13 @@ namespace TYBIM.AutoBuild
                     var c=group[0];
                     string pick = mappings.TryGetValue(c.Layer,out string saved) && families.ContainsKey(saved) ? saved : Suggest(c, group.Count >= 3, families);
                     if (c.Frame!="") pick=Skip;
+                    bool remembered = choices.TryGetValue(ChoiceKey(c), out string previous);
+                    if (remembered)
+                        pick = previous == Skip || families.ContainsKey(previous) ? previous : Skip;
                     int used=group.Sum(v=>levels.Take(levels.Count-1).Count(l=>occupied.Contains(l.Id+"|"+Position(v.Point))));
                     var row=grid.Rows[grid.Rows.Add(c.Layer,c.Width+" × "+c.Depth,group.Count,used,c.Frame,pick)];
                     row.Tag=group;
-                    if (pick==Skip && c.Frame=="") reviewRows.Add(row);
+                    if (pick==Skip && (remembered || c.Frame=="")) reviewRows.Add(row);
                 }
                 void RefreshRow(F.DataGridViewRow row)
                 {
@@ -204,7 +224,7 @@ namespace TYBIM.AutoBuild
                         combo.DroppedDown = true;
                 };
                 var showAll = new F.CheckBox { Text="顯示其他矩形（" + reviewRows.Count + " 組）",
-                    Dock=F.DockStyle.Top, Checked=reviewRows.Count==grid.Rows.Count };
+                    Dock=F.DockStyle.Top, Checked=reviewRows.Count==grid.Rows.Count && choices.Count==0 };
                 void FilterRows()
                 {
                     grid.CurrentCell=null;
@@ -213,7 +233,7 @@ namespace TYBIM.AutoBuild
                 }
                 showAll.CheckedChanged+=(sender,e)=>FilterRows();
                 FilterRows();
-                var ok=new F.Button { Text="建立選定柱", Dock=F.DockStyle.Bottom, Height=36 };
+                var ok=new F.Button { Text="建立選定柱", AutoSize=true };
                 ok.Click+=(s,e)=>{
                     var seen=new HashSet<string>();
                     foreach(F.DataGridViewRow row in grid.Rows)
@@ -221,12 +241,61 @@ namespace TYBIM.AutoBuild
                         { F.MessageBox.Show("同一位置選了多個輪廓，請保留一組。"); return; }
                     form.DialogResult=F.DialogResult.OK;
                 };
-                form.Controls.Add(grid);
+                var footer = new F.FlowLayoutPanel { Dock=F.DockStyle.Bottom, AutoSize=true, Padding=new F.Padding(4) };
+                var cancel = new F.Button { Text="取消", AutoSize=true, DialogResult=F.DialogResult.Cancel };
+                footer.Controls.AddRange(new F.Control[] { ok, cancel });
+                form.CancelButton=cancel;
+                var instructions = new F.Label { Dock=F.DockStyle.Top, AutoSize=true, Padding=new F.Padding(5),
+                    Text="請確認各組的放置族群。點選欄位可更換族群或選「略過」，同心框請擇一。核對下方平面後，按「建立選定柱」會記住此 CAD 各組的選擇（含略過），並套用至所選樓層。" };
+                var split = new F.SplitContainer { Dock=F.DockStyle.Fill, Orientation=F.Orientation.Horizontal,
+                    Size=new D.Size(960,580), SplitterDistance=235 };
+                split.Panel1.Controls.Add(grid);
+                var canvas = new F.PictureBox { Dock=F.DockStyle.Fill, BackColor=D.Color.White };
+                var legend = new F.FlowLayoutPanel { Dock=F.DockStyle.Top, AutoSize=true };
+                var story = new F.ComboBox { DropDownStyle=F.ComboBoxStyle.DropDownList };
+                for(int i=0; i<levels.Count-1; i++) story.Items.Add(levels[i].Name+" → "+levels[i+1].Name);
+                story.SelectedIndex=0;
+                legend.Controls.AddRange(new F.Control[] { story, new F.Label { AutoSize=true, Padding=new F.Padding(3),
+                    Text="灰線：CAD　紅色：預計建立的結構柱　藍色：預計建立的建築柱（已放置的位置略過）" } });
+                split.Panel2.Controls.Add(canvas);
+                split.Panel2.Controls.Add(legend);
+                var lines=LayersForm.wallLines.Where(l=>l.ImportId==LayersForm.columnImportId).ToList();
+                var endpoints=lines.SelectMany(l=>new[]{l.Start,l.End}).ToList();
+                double left=endpoints.Min(p=>p.X), right=endpoints.Max(p=>p.X);
+                double bottom=endpoints.Min(p=>p.Y), top=endpoints.Max(p=>p.Y);
+                canvas.Resize+=(sender,e)=>canvas.Invalidate();
+                story.SelectedIndexChanged+=(sender,e)=>canvas.Invalidate();
+                grid.CellValueChanged+=(sender,e)=>canvas.Invalidate();
+                canvas.Paint+=(sender,e)=>
+                {
+                    if(canvas.Width<=24 || canvas.Height<=24) return;
+                    double scale=Math.Min((canvas.Width-24)/Math.Max(right-left,Mm),(canvas.Height-24)/Math.Max(top-bottom,Mm));
+                    D.PointF Map(XYZ p)=>new D.PointF((float)(canvas.Width/2.0+(p.X-(left+right)/2)*scale),
+                        (float)(canvas.Height/2.0-(p.Y-(bottom+top)/2)*scale));
+                    foreach(var line in lines) e.Graphics.DrawLine(D.Pens.LightGray,Map(line.Start),Map(line.End));
+                    foreach(F.DataGridViewRow row in grid.Rows)
+                    {
+                        var pick=(string)row.Cells[5].Value;
+                        if(pick==Skip) continue;
+                        bool architectural=Architectural(families[pick][0]);
+                        foreach(var c in (List<Candidate>)row.Tag)
+                        {
+                            if(occupied.Contains(levels[story.SelectedIndex].Id+"|"+Position(c.Point))) continue;
+                            var u=new XYZ(Math.Cos(c.Angle),Math.Sin(c.Angle),0)*(c.Width*Mm/2);
+                            var v=new XYZ(-Math.Sin(c.Angle),Math.Cos(c.Angle),0)*(c.Depth*Mm/2);
+                            var corners=new[]{Map(c.Point-u-v),Map(c.Point+u-v),Map(c.Point+u+v),Map(c.Point-u+v)};
+                            e.Graphics.FillPolygon(architectural ? D.Brushes.SteelBlue : D.Brushes.Firebrick,corners);
+                            e.Graphics.DrawPolygon(architectural ? D.Pens.SteelBlue : D.Pens.Firebrick,corners);
+                        }
+                    }
+                };
+                form.Controls.Add(split);
                 form.Controls.Add(showAll);
-                form.Controls.Add(ok);
+                form.Controls.Add(instructions);
+                form.Controls.Add(footer);
                 if(form.ShowDialog()!=F.DialogResult.OK) return;
                 int placed=0, skipped=0;
-                var learned=new Dictionary<string,HashSet<string>>();
+                bool choicesChanged = false;
                 var errors=new List<string>();
                 using(var tx=new Transaction(doc,"自動翻柱"))
                 {
@@ -258,11 +327,7 @@ namespace TYBIM.AutoBuild
                                     if(!types.Contains(symbol)) types.Add(symbol);
                                     occupied.Add(key);
                                     placed++;
-                                    if(c.Frame=="")
-                                    {
-                                        if(!learned.ContainsKey(c.Layer)) learned[c.Layer]=new HashSet<string>();
-                                        learned[c.Layer].Add(pick);
-                                    }
+
                                 }
                                 catch(Exception e)
                                 {
@@ -272,11 +337,15 @@ namespace TYBIM.AutoBuild
                             }
                         }
                     }
-                    foreach(var layer in learned)
-                        if(layer.Value.Count==1 && grid.Rows.Cast<F.DataGridViewRow>().Where(r=>((List<Candidate>)r.Tag)[0].Layer==layer.Key && ((List<Candidate>)r.Tag)[0].Frame=="").All(r=>layer.Value.Contains((string)r.Cells[5].Value)))
-                            mappings[layer.Key]=layer.Value.Single();
-                        else mappings.Remove(layer.Key);
-                    if(learned.Count>0)
+                    foreach (F.DataGridViewRow row in grid.Rows)
+                    {
+                        string key = ChoiceKey(((List<Candidate>)row.Tag)[0]);
+                        string pick = (string)row.Cells[5].Value;
+                        if (choices.TryGetValue(key, out string previous) && previous == pick) continue;
+                        choices[key] = pick;
+                        choicesChanged = true;
+                    }
+                    if (choicesChanged)
                     {
                         if(schema==null)
                         {
@@ -286,8 +355,8 @@ namespace TYBIM.AutoBuild
                             schema=builder.Finish();
                         }
                         var saved=new Entity(schema);
-                        saved.Set<IDictionary<string,string>>("Layers",mappings);
-                        doc.ProjectInformation.SetEntity(saved);
+                        saved.Set<IDictionary<string,string>>("Layers",choices);
+                        cad.SetEntity(saved);
                     }
                     if(tx.Commit()!=TransactionStatus.Committed) throw new InvalidOperationException("翻柱交易未完成。");
                 }

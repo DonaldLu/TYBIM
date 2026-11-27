@@ -1,4 +1,4 @@
-﻿using Autodesk.Revit.DB;
+using Autodesk.Revit.DB;
 using Autodesk.Revit.DB.Structure;
 using Autodesk.Revit.UI;
 using System;
@@ -7,8 +7,14 @@ using System.Linq;
 
 namespace TYBIM.AutoBuild
 {
-    public class CreateBeams : IExternalEventHandler
+    [Autodesk.Revit.Attributes.Transaction(Autodesk.Revit.Attributes.TransactionMode.Manual)]
+    public class CreateBeams : IExternalCommand, IExternalEventHandler
     {
+        public Result Execute(ExternalCommandData commandData, ref string message, ElementSet elements)
+        {
+            return LayersForm.OpenForm(commandData, "樑");
+        }
+
         public void Execute(UIApplication app)
         {
             if (app.ActiveUIDocument == null) return;

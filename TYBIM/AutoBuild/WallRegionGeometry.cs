@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -116,6 +116,7 @@ namespace TYBIM.AutoBuild
         internal static bool OpeningCoversGap(List<Segment> openings, Point start, Point direction,
             double gap, double width, double tolerance)
         {
+            tolerance = Math.Max(tolerance, Math.Min(width * 0.2, 30 / 304.8));
             Point normal = Normal(direction);
             var left = new List<Tuple<double, double>>();
             var right = new List<Tuple<double, double>>();
@@ -126,7 +127,7 @@ namespace TYBIM.AutoBuild
             {
                 double a = Dot(line.A - start, direction), b = Dot(line.B - start, direction);
                 double x = Dot(line.A - start, normal), y = Dot(line.B - start, normal);
-                if (Math.Abs(Cross(Direction(line), direction)) <= 1e-6 &&
+                if (Math.Abs(Cross(Direction(line), direction)) <= Math.Sin(Math.PI / 180) &&
                     Math.Abs(x) <= width / 2 + tolerance && Math.Abs(y) <= width / 2 + tolerance)
                 {
                     var span = Tuple.Create(Math.Min(a, b), Math.Max(a, b));
@@ -134,7 +135,7 @@ namespace TYBIM.AutoBuild
                     else if (x > tolerance && y > tolerance) left.Add(span);
                     else if (x < -tolerance && y < -tolerance) right.Add(span);
                 }
-                if (Math.Abs(Cross(Direction(line), normal)) <= 1e-6)
+                if (Math.Abs(Cross(Direction(line), normal)) <= Math.Sin(Math.PI / 180))
                 {
                     var span = Tuple.Create(Math.Min(x, y), Math.Max(x, y));
                     if (Math.Abs(a) <= tolerance && Math.Abs(b) <= tolerance) firstJamb.Add(span);
@@ -189,6 +190,103 @@ namespace TYBIM.AutoBuild
                 }
             }
             return points;
+        }
+        // A swing ending at a pier can have a host wall on only one side.
+        // Project the closed leaf span onto that wall, retaining its measured width.
+        internal static Segment SwingHost(Segment radius, List<Segment> axes)
+        {
+            if (radius.Length < 350 / 304.8 || radius.Length > 2400 / 304.8) return null;
+            return ExtendHost(radius, axes);
+        }
+
+        private static Segment ExtendHost(Segment radius, List<Segment> axes)
+        {
+            Segment best = null;
+            double score = double.MaxValue;
+            foreach (var axis in axes)
+            {
+                var d = Direction(axis);
+                if (Math.Abs(Cross(d, Direction(radius))) > Math.Sin(Math.PI / 90)) continue;
+                var a = radius.A - axis.A;
+                var b = radius.B - axis.A;
+                double side = Math.Max(Math.Abs(Cross(d, a)), Math.Abs(Cross(d, b)));
+                double reach = axis.WidthMm / 609.6 + 30 / 304.8;
+                if (side > reach) continue;
+                double lo = Math.Min(Dot(a, d), Dot(b, d)), hi = Math.Max(Dot(a, d), Dot(b, d));
+                double distance = Math.Min(Math.Abs(hi), Math.Abs(lo - axis.Length));
+                if (distance > reach || distance + side >= score) continue;
+                var start = Math.Abs(hi) < Math.Abs(lo - axis.Length) ? axis.A + d * lo : axis.B;
+                var end = Math.Abs(hi) < Math.Abs(lo - axis.Length) ? axis.A : axis.A + d * hi;
+                best = new Segment(start, end) { WidthMm = axis.WidthMm };
+                score = distance + side;
+            }
+            return best;
+        }
+
+        internal static IEnumerable<Segment> DoubleDoorHosts(List<Segment> radii, List<Segment> axes)
+        {
+            var leaves = radii.Where(s => s.Length >= 350 / 304.8 && s.Length <= 2400 / 304.8).ToList();
+            for (int i = 0; i < leaves.Count; i++)
+                for (int j = i + 1; j < leaves.Count; j++)
+                {
+                    var a = leaves[i];
+                    var b = leaves[j];
+                    // The closed leaves point toward one another and meet at the latch.
+                    if (Dot(Direction(a), Direction(b)) > -Math.Cos(Math.PI / 90) ||
+                        LengthOf(a.B - b.B) > 60 / 304.8) continue;
+                    var host = ExtendHost(new Segment(a.A, b.A), axes);
+                    if (host != null) yield return host;
+                }
+        }
+        // Opposite wall end caps can define a host even when both adjacent
+        // elements turn away from its axis (column to return wall).
+        internal static IEnumerable<Segment> FramedOpeningHosts(List<Segment> openingLines,
+            List<Segment> wallLines, List<Segment> existing, double maxWidth, double tolerance)
+        {
+            var rails = Merge(openingLines, tolerance);
+            var caps = wallLines.Where(s => s.Length >= 50 / 304.8 && s.Length <= maxWidth).ToList();
+            foreach (var rail in rails.Where(s => s.Length > 350 / 304.8))
+            {
+                var d = Direction(rail);
+                var n = Normal(d);
+                var ends = caps.Where(c => Math.Abs(Dot(Direction(c), d)) < 0.01)
+                    .Select(c => (mid: (c.A + c.B) * 0.5, width: c.Length))
+                    .Where(c => Math.Abs(Dot(c.mid - rail.A, n)) <= c.width / 2 + tolerance).ToList();
+                foreach (var first in ends.Where(c => LengthOf(c.mid - rail.A) <= c.width))
+                    foreach (var last in ends.Where(c => LengthOf(c.mid - rail.B) <= c.width))
+                    {
+                        if (Math.Abs(first.width - last.width) > 2 * tolerance ||
+                            Math.Abs(Dot(last.mid - first.mid, n)) > tolerance) continue;
+                        var span = new Segment(first.mid, last.mid);
+                        if (span.Length <= first.width * 2) continue;
+                        // Require evidence on both sides for the entire cap-to-cap span.
+                        var sides = rails.Where(s => Math.Abs(Dot(s.A - first.mid, n)) > first.width * 0.3 &&
+                            Math.Abs(Dot(s.B - first.mid, n)) > first.width * 0.3 &&
+                            Math.Abs(Cross(Direction(s), d)) < 0.01).ToList();
+                        if (!OpeningCoversGap(sides, first.mid, Direction(span), span.Length, first.width, tolerance)) continue;
+                        span.WidthMm = (int)Math.Round(first.width * 304.8, MidpointRounding.AwayFromZero);
+                        // A collinear host may already cover this opening using the adjacent wall type.
+                        if (existing.Any(s => Math.Abs(Cross(Direction(s), d)) < 0.01 &&
+                            Math.Abs(Dot(s.A - first.mid, n)) < tolerance &&
+                            Math.Min(Dot(first.mid - s.A, Direction(s)), Dot(last.mid - s.A, Direction(s))) >= -tolerance &&
+                            Math.Max(Dot(first.mid - s.A, Direction(s)), Dot(last.mid - s.A, Direction(s))) <= s.Length + tolerance)) continue;
+                        yield return span;
+                    }
+            }
+        }
+        internal static IEnumerable<Segment> OpeningHosts(List<Segment> openingRails, List<Segment> axes, double tolerance)
+        {
+            var rails = Merge(openingRails, tolerance);
+            foreach (var rail in rails)
+            {
+                if (rail.Length < 350 / 304.8) continue;
+                var host = ExtendHost(rail, axes);
+                if (host == null || host.Length <= tolerance) continue;
+                // The neighboring wall supplies the axis and width. The opening must
+                // actually span the proposed extension on its center or on both sides.
+                if (OpeningCoversGap(rails, host.A, Direction(host), host.Length, host.WidthMm / 304.8, tolerance))
+                    yield return host;
+            }
         }
         internal static List<Segment> Merge(IEnumerable<Segment> source, double tolerance)
         {
@@ -444,5 +542,3 @@ namespace TYBIM.AutoBuild
         }
     }
 }
-
-

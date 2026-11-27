@@ -44,12 +44,45 @@ internal static class Program
         Frame(disconnected, 0, 0);
         Frame(disconnected, 20, 0);
         Check("Disconnected closed frames", disconnected, 2, 128);
+        var failedMember = new Rect(new Point(4, 4), new Point(6, 6));
+        int clearRegions = 0;
+        foreach (var region in disconnected.GetInnerRegions())
+            if (FloorFootprintGeometry.IsRegionClear(region, new[] { failedMember })) clearRegions++;
+        if (clearRegions != 1)
+            throw new Exception("An unreadable member must block its own bay and leave a separate bay available.");
+
+        var failedEdge = new Rect(new Point(1, 2), new Point(1.1, 3));
+        var concave = new[] { new Point(0,0), new Point(8,0), new Point(8,2),
+            new Point(2,2), new Point(2,8), new Point(0,8) };
+        if (!FloorFootprintGeometry.IsRegionClear(concave, new[] { failedMember }))
+            throw new Exception("A member outside an L-shaped bay cannot invalidate it.");
+        if (FloorFootprintGeometry.IsRegionClear(single.GetInnerRegions()[0], new[] { failedEdge }))
+            throw new Exception("An unreadable member touching the region boundary must block it.");
+        Console.WriteLine("PASS: Geometry failures are isolated to nearby regions.");
 
         var open = new FloorFootprintGeometry();
         Rectangle(open, 0, 0, 10, 1);
         Rectangle(open, 0, 9, 10, 10);
         Rectangle(open, 0, 1, 1, 9);
         Check("Open frame creates no slab", open, 0, 0);
+
+        const double gapLimit = 5.0 / 304.8;
+        if (open.CloseSmallGaps(gapLimit) != 0)
+            throw new Exception("A missing wall must not be bridged.");
+        foreach (double millimeters in new[] { 3.0, 5.0, 6.0 })
+        {
+            double gap = millimeters / 304.8;
+            var gapped = new FloorFootprintGeometry();
+            Rectangle(gapped, 0, 0, 10, 1);
+            Rectangle(gapped, 0, 9, 10, 10);
+            Rectangle(gapped, 0, 1, 1, 9);
+            Rectangle(gapped, 9, 1 + gap, 10, 9);
+            Check("Before gap repair", gapped, 0, 0);
+            int bridges = gapped.CloseSmallGaps(gapLimit);
+            if (bridges != (millimeters <= 5 ? 1 : 0))
+                throw new Exception("The gap was classified incorrectly: " + millimeters + " mm.");
+            Check(millimeters + " mm joint", gapped, millimeters <= 5 ? 1 : 0, millimeters <= 5 ? 64 : 0);
+        }
 
         var touching = new FloorFootprintGeometry();
         Rectangle(touching, 0, 0, 10, 1);
@@ -62,7 +95,29 @@ internal static class Program
         var hollow = new FloorFootprintGeometry();
         hollow.Add(new[] { Points(0, 0, 10, 10), Points(1, 1, 9, 9) });
         Check("Nested loops independent of orientation", hollow, 1, 64);
-        Console.WriteLine("All 14 level membership and floor footprint regression cases passed.");
+        if (!FloorLevelMembership.WallExtendsAboveLevel(0, 10, 0, 0.0033)
+            || FloorLevelMembership.WallExtendsAboveLevel(0, 10, 10, 0.0033))
+            throw new Exception("Story walls must enclose their base level without being reused at their top.");
+
+        foreach (double wallEnd in new[] { 0.5, 1.0, 1.0 + gapLimit / 2 })
+        {
+            // A join trims the walls to the column faces. Unjoined walls can overlap them.
+            var wallFrame = new FloorFootprintGeometry();
+            foreach (double x in new[] { 0.0, 9.0 })
+            foreach (double y in new[] { 0.0, 9.0 })
+                Rectangle(wallFrame, x, y, x + 1, y + 1);
+            Rectangle(wallFrame, wallEnd, 0, 10 - wallEnd, 1);
+            Rectangle(wallFrame, wallEnd, 9, 10 - wallEnd, 10);
+            Rectangle(wallFrame, 0, wallEnd, 1, 10 - wallEnd);
+            Rectangle(wallFrame, 9, wallEnd, 10, 10 - wallEnd);
+            if (wallEnd > 1)
+            {
+                Check("Column-wall gaps before repair", wallFrame, 0, 0);
+                if (wallFrame.CloseSmallGaps(gapLimit) != 8)
+                    throw new Exception("Every wall end must connect to its adjacent column.");
+            }
+            Check("Wall-column frame at end offset " + wallEnd, wallFrame, 1, 64);
+        }
     }
 
     private static void Frame(FloorFootprintGeometry geometry, double x, double y)

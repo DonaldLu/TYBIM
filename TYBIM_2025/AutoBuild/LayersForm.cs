@@ -52,6 +52,8 @@ namespace TYBIM_2025.AutoBuild
             public ElementId ImportId;
             public XYZ Start, End;
         }
+        // A swing arc has two possible leaf positions. Only the radius aligned with a wall can close its gap.
+        internal static List<CadWallLine> doorRadii = new List<CadWallLine>();
         internal static List<CadWallLine> wallLines = new List<CadWallLine>();
         internal static Dictionary<string, int> unsupportedWallCurves = new Dictionary<string, int>();
         internal static Document cadDocument;
@@ -71,6 +73,23 @@ namespace TYBIM_2025.AutoBuild
             int style = NativeMethods.GetWindowLong(listView.Handle, NativeMethods.GWL_STYLE);
             NativeMethods.SetWindowLong(listView.Handle, NativeMethods.GWL_STYLE, style & ~NativeMethods.WS_HSCROLL);
         }
+        internal static Result OpenForm(ExternalCommandData commandData, string elementType)
+        {
+            if (commandData.Application.ActiveUIDocument == null) return Result.Cancelled;
+            // 共用 CAD 資料，因此切換指令時關閉舊視窗，再讀取目前文件。
+            var myForm = System.Windows.Forms.Application.OpenForms["LayersForm"];
+            if (myForm is LayersForm pendingForm && pendingForm.HasPendingEvent)
+            {
+                myForm.BringToFront();
+                return Result.Succeeded;
+            }
+            if (myForm != null) myForm.Close();
+            LayersForm layersForm = new LayersForm(commandData.Application.ActiveUIDocument, elementType);
+            layersForm.Show();
+
+            return Result.Succeeded;
+        }
+
         public LayersForm(UIDocument uidoc, string elementType)
         {
             this.elementType = elementType;
@@ -92,12 +111,15 @@ namespace TYBIM_2025.AutoBuild
             CreateLayerNames(layers); // 建立圖層名稱
 
             if (elementType == "牆") ConfigureWallSelection();
-            if (elementType == "柱")
+            if (elementType == "柱" || elementType == "牆")
             {
                 groupBox1.Visible = false;
                 int unusedWidth = groupBox3.Left - groupBox1.Left;
                 MinimumSize = new Size(MinimumSize.Width - unusedWidth, MinimumSize.Height);
                 Width -= unusedWidth;
+            }
+            if (elementType == "柱")
+            {
                 groupBox3.Text = "樓層與 CAD 連結";
                 label3.Text = "CAD 連結";
                 sureBtn.Text = "預覽柱";
@@ -180,24 +202,28 @@ namespace TYBIM_2025.AutoBuild
                             new WallRegionGeometry.Point(line.End.X, line.End.Y))));
                 var found = WallLayerDetector.AnalyzeWalls(lines, 1000 / 304.8)
                     .Where(layer => layer.Recommended).Select(layer => layer.Layer).ToList();
+                // Numbered companion layers may only supply short returns or end caps.
+                if (found.Contains("WALL", StringComparer.OrdinalIgnoreCase))
+                {
+                    var companions = lines.Select(line => line.Key).Distinct()
+                        .Where(name => System.Text.RegularExpressions.Regex.IsMatch(name, @"^WALL[0-9]+$",
+                            System.Text.RegularExpressions.RegexOptions.IgnoreCase));
+                    recommended.UnionWith(companions);
+                }
                 recommended.UnionWith(found);
                 if (found.Count > 0)
                     recommended.UnionWith(import.Select(line => line.Layer).Where(WallRegionGeometry.IsOpeningLayer));
             }
             allRbtn.Checked = false;
-            foreach (ListViewItem item in listView1.Items) item.Checked = recommended.Contains(item.Text);
-            var toggle = new Button { Text = "調整圖層", AutoSize = true, Location = new System.Drawing.Point(176, 22) };
-            groupBox1.Controls.Add(toggle);
-            bool expanded = recommended.Count == 0;
-            void DisplayLayers()
+            listView1.Columns[0].Width = Math.Max(130, listView1.ClientSize.Width - 84);
+            listView1.Columns.Add("建議", 62);
+            foreach (ListViewItem item in listView1.Items)
             {
-                listView1.Visible = allRbtn.Visible = allCancelRbtn.Visible = expanded;
-                toggle.Text = expanded ? "收合圖層" : "調整圖層";
+                item.Checked = recommended.Contains(item.Text);
+                item.SubItems.Add(item.Checked ? "推薦" : "");
             }
-            toggle.Click += (sender, args) => { expanded = !expanded; DisplayLayers(); };
-            DisplayLayers();
-            groupBox1.Text = recommended.Count == 0 ? "未辨識到牆，請手動選層" : "自動推薦圖層（可調整）";
-            sureBtn.Text = "預覽牆線";
+            groupBox1.Text = recommended.Count == 0 ? "請選擇要計算的圖層" : "計算圖層（已勾選推薦圖層）";
+            sureBtn.Text = "預覽牆體";
         }
 
         private void ConfigureLayout()
@@ -267,6 +293,7 @@ namespace TYBIM_2025.AutoBuild
         private List<string> GetCADLayerLines(Document doc)
         {
             wallLines.Clear();
+            doorRadii.Clear();
             unsupportedWallCurves.Clear();
             cadDocument = doc;
             List<ImportInstance> importInstances = new FilteredElementCollector(doc, doc.ActiveView.Id).OfClass(typeof(ImportInstance)).Cast<ImportInstance>().Where(x => x.Category != null).ToList();
@@ -274,12 +301,58 @@ namespace TYBIM_2025.AutoBuild
             {
                 if (importInstance.IsLinked)
                 {
+                    if (elementType == "牆")
+                        foreach (Category category in importInstance.Category.SubCategories)
+                            layers.Add(category.Name);
                     ReadCadGeometry(doc, importInstance.get_Geometry(options), Transform.Identity, null, importInstance.Id);
                 }
             }
+            if (elementType == "牆") layers.AddRange(wallLines.Select(line => line.Layer));
             layers = layers.Distinct().OrderBy(x => x).ToList(); // 排序
 
             return layers;
+        }
+        // CAD solid fills can arrive as planar faces or triangulated meshes.
+        // Only their perimeter is a potential column outline.
+        private void ReadColumnFace(Document doc, Face face, Transform transform, string fallback, ElementId importId, Dictionary<string, CadWallLine> boundary)
+        {
+            if (!(face is PlanarFace plane) || Math.Abs(transform.OfVector(plane.FaceNormal).Normalize().Z) < 0.99999) return;
+            string layer = (doc.GetElement(face.GraphicsStyleId) as GraphicsStyle)?.GraphicsStyleCategory?.Name ?? fallback;
+            if (string.IsNullOrEmpty(layer)) return;
+            foreach (var loop in face.GetEdgesAsCurveLoops())
+            {
+                var curves = loop.ToList();
+                if (!curves.All(c => c is Autodesk.Revit.DB.Line)) continue;
+                foreach (var c in curves)
+                    ToggleBoundary(boundary, layer, importId, transform.OfPoint(c.GetEndPoint(0)), transform.OfPoint(c.GetEndPoint(1)));
+            }
+        }
+
+        private static void ToggleBoundary(Dictionary<string, CadWallLine> boundary, string layer, ElementId importId, XYZ a, XYZ b)
+        {
+            string Key(XYZ p) => Math.Round(p.X * 3048) + "|" + Math.Round(p.Y * 3048) + "|" + Math.Round(p.Z * 3048);
+            string ka = Key(a), kb = Key(b);
+            string key = layer + ":" + (string.CompareOrdinal(ka, kb) < 0 ? ka + "/" + kb : kb + "/" + ka);
+            if (!boundary.Remove(key))
+                boundary.Add(key, new CadWallLine { Layer = layer, ImportId = importId, Start = a, End = b });
+        }
+
+        private void ReadColumnMesh(Mesh mesh, Transform transform, string layer, ElementId importId)
+        {
+            if (string.IsNullOrEmpty(layer)) return;
+            var boundary = new Dictionary<string, CadWallLine>();
+            for (int i = 0; i < mesh.NumTriangles; i++)
+            {
+                var triangle = mesh.get_Triangle(i);
+                var points = Enumerable.Range(0, 3).Select(j => transform.OfPoint(triangle.get_Vertex(j))).ToArray();
+                if (points.Max(p => p.Z) - points.Min(p => p.Z) > 1 / 304.8) continue;
+                for (int j = 0; j < 3; j++)
+                {
+                    XYZ a = points[j], b = points[(j + 1) % 3];
+                    ToggleBoundary(boundary, layer, importId, a, b);
+                }
+            }
+            wallLines.AddRange(boundary.Values);
         }
         private void ReadCadGeometry(Document doc, GeometryElement geometry, Transform transform, string inheritedLayer, ElementId importId)
         {
@@ -288,10 +361,27 @@ namespace TYBIM_2025.AutoBuild
             {
                 GraphicsStyle style = doc.GetElement(obj.GraphicsStyleId) as GraphicsStyle;
                 string layer = style?.GraphicsStyleCategory?.Name ?? inheritedLayer;
+                if (elementType == "牆" && layer == "0" && inheritedLayer != null && WallRegionGeometry.IsOpeningLayer(inheritedLayer))
+                    layer = inheritedLayer;
                 if (obj is GeometryInstance instance)
                 {
                     ReadCadGeometry(doc, instance.GetSymbolGeometry(), transform.Multiply(instance.Transform), layer, importId);
                     continue;
+                }
+                if (elementType == "柱" || elementType == "牆")
+                {
+                    if (obj is Solid solid)
+                    {
+                        var boundary = new Dictionary<string, CadWallLine>();
+                        foreach (Face face in solid.Faces) ReadColumnFace(doc, face, transform, layer, importId, boundary);
+                        wallLines.AddRange(boundary.Values);
+                        continue;
+                    }
+                    if (obj is Mesh mesh)
+                    {
+                        ReadColumnMesh(mesh, transform, layer, importId);
+                        continue;
+                    }
                 }
                 if (string.IsNullOrEmpty(layer)) continue;
                 if (obj is PolyLine polyline)
@@ -306,6 +396,17 @@ namespace TYBIM_2025.AutoBuild
                 {
                     wallLines.Add(new CadWallLine { Layer = layer, ImportId = importId,
                         Start = transform.OfPoint(line.GetEndPoint(0)), End = transform.OfPoint(line.GetEndPoint(1)) });
+                    layers.Add(layer);
+                }
+                else if (elementType == "牆" && obj is Arc swing && swing.IsBound &&
+                    WallRegionGeometry.IsOpeningLayer(layer) &&
+                    Math.Abs(transform.OfVector(swing.Normal).Normalize().Z) > 0.9999 &&
+                    Math.Abs(swing.Length / swing.Radius - Math.PI / 2) <= Math.PI / 12)
+                {
+                    XYZ hinge = transform.OfPoint(swing.Center);
+                    for (int i = 0; i < 2; i++)
+                        doorRadii.Add(new CadWallLine { Layer = layer, ImportId = importId,
+                            Start = hinge, End = transform.OfPoint(swing.GetEndPoint(i)) });
                     layers.Add(layer);
                 }
                 else if (obj is Curve)
@@ -343,11 +444,13 @@ namespace TYBIM_2025.AutoBuild
         // 全選
         private void allRbtn_CheckedChanged(object sender, EventArgs e)
         {
+            if (sender is RadioButton button && !button.Checked) return;
             for (int i = 0; i < listView1.Items.Count; i++) { listView1.Items[i].Checked = true; }
         }
         // 全部取消
         private void allCancelRbtn_CheckedChanged(object sender, EventArgs e)
         {
+            if (sender is RadioButton button && !button.Checked) return;
             for (int i = 0; i < listView1.Items.Count; i++) { listView1.Items[i].Checked = false; }
         }
         // 確定
@@ -392,7 +495,7 @@ namespace TYBIM_2025.AutoBuild
             try
             {
                 selectedLayers = listView1.CheckedItems.Cast<ListViewItem>().Select(item => item.Text).ToList();
-                if (elementType != "柱" && selectedLayers.Count == 0)
+                if (elementType == "樑" && selectedLayers.Count == 0)
                 {
                     MessageBox.Show("請至少選擇一個圖層。");
                     return;
@@ -428,7 +531,3 @@ namespace TYBIM_2025.AutoBuild
         }
     }
 }
-
-
-
-
